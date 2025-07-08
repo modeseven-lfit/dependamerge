@@ -84,6 +84,23 @@ class GitHubClient:
         except GithubException as e:
             raise RuntimeError(f"Failed to fetch PR info: {e}") from e
 
+    def get_pull_request_commits(self, owner: str, repo: str, pr_number: int) -> List[str]:
+        """Get commit messages from a pull request."""
+        try:
+            repository = self.github.get_repo(f"{owner}/{repo}")
+            pr = repository.get_pull(pr_number)
+
+            commits = pr.get_commits()
+            commit_messages = []
+
+            for commit in commits:
+                if commit.commit.message:
+                    commit_messages.append(commit.commit.message)
+
+            return commit_messages
+        except GithubException as e:
+            raise RuntimeError(f"Failed to fetch PR commits: {e}") from e
+
     def get_organization_repositories(self, org_name: str) -> List[Repository]:
         """Get all repositories in an organization."""
         try:

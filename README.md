@@ -5,23 +5,30 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # Dependamerge
 
-Automatically merge pull requests created by automation tools (like Dependabot,
-pre-commit.ci, Renovate) across GitHub organizations.
+Automatically merge similar pull requests across GitHub organizations, supporting both automation tools (like Dependabot, pre-commit.ci, Renovate) and regular GitHub users.
 
 ## Overview
 
-Dependamerge analyzes a source pull request from an automation tool and finds
-similar pull requests across all repositories in the same GitHub organization.
-It then automatically approves and merges the matching PRs, saving time on
-routine dependency updates and automated maintenance tasks.
+Dependamerge analyzes a source pull request and finds similar pull requests
+across all repositories in the same GitHub organization. It then automatically
+approves and merges the matching PRs, saving time on routine dependency updates,
+automated maintenance tasks, and coordinated changes across multiple repositories.
+
+**Supports two types of pull requests:**
+- **Automation PRs**: From tools like Dependabot, pre-commit.ci, Renovate (original functionality)
+- **Non-Automation PRs**: From regular GitHub users with SHA-based security validation (new feature)
 
 ## Features
 
 - **Automated PR Detection**: Identifies pull requests created by popular
   automation tools
+- **Non-Automation PR Support**: Handles PRs from regular GitHub users with
+  SHA-based security validation
 - **Smart Matching**: Uses content similarity algorithms to match related PRs
   across repositories
 - **Bulk Operations**: Approve and merge related similar PRs with a single command
+- **Security Features**: SHA-based authentication for non-automation PRs ensures
+  only authorized bulk merges
 - **Dry Run Mode**: Preview what changes will apply without modifications
 - **Rich CLI Output**: Beautiful terminal output with progress indicators and tables
 
@@ -65,6 +72,34 @@ Or pass it directly to the command using `--token`.
 
 ## Usage
 
+### Automation PRs (Original Functionality)
+
+For pull requests from automation tools like Dependabot, pre-commit.ci, and Renovate:
+
+```bash
+dependamerge https://github.com/lfreleng-actions/python-project-name-action/pull/22
+```
+
+### Non-Automation PRs (New Feature)
+
+For pull requests from regular GitHub users, a two-step process ensures security:
+
+**Step 1: Get the required SHA**
+```bash
+dependamerge https://github.com/owner/repo/pull/123
+# Output: To merge this and similar PRs, run again with: --override a1b2c3d4e5f6g7h8
+```
+
+**Step 2: Use the SHA to proceed**
+```bash
+dependamerge https://github.com/owner/repo/pull/123 --override a1b2c3d4e5f6g7h8
+```
+
+The SHA hash is generated based on:
+- The PR author's GitHub username
+- The first line of the commit message
+- This ensures only PRs from the same author with matching commits can be bulk merged
+
 ### Basic Usage
 
 ```bash
@@ -94,8 +129,11 @@ dependamerge https://github.com/owner/repo/pull/123 \
 - `--merge-method TEXT`: Merge method - merge, squash, or rebase (default: merge)
 - `--fix`: Automatically fix out-of-date branches before merging
 - `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
+- `--override TEXT`: SHA hash to override non-automation PR restriction
 
 ## How It Works
+
+### For Automation PRs
 
 1. **Parse Source PR**: Analyzes the provided pull request URL and extracts metadata
 2. **Validation**: Ensures the PR is from a recognized automation tool
@@ -108,8 +146,17 @@ dependamerge https://github.com/owner/repo/pull/123 \
 6. **Approval & Merge**: For matching PRs above the threshold:
    - Adds an approval review
    - Merges the pull request
-7. **Source PR Merge**: Merges the original source PR that served as the
-   baseline
+7. **Source PR Merge**: Merges the original source PR that served as the baseline
+
+### For Non-Automation PRs
+
+1. **Parse Source PR**: Analyzes the provided pull request URL and extracts metadata
+2. **Non-Automation Detection**: Identifies that PR is from a regular user
+3. **SHA Generation**: Creates unique SHA based on author + commit message
+4. **Override Validation**: If `--override` provided, validates SHA matches expectations
+5. **Author-Specific Scan**: Finds PRs from the same author only
+6. **Content Matching**: Same similarity algorithms as automation PRs
+7. **Approval & Merge**: Merges matching PRs from the same author
 
 ## Similarity Matching
 
@@ -152,6 +199,17 @@ dependamerge https://github.com/myorg/repo1/pull/45
 dependamerge https://github.com/myorg/repo1/pull/12 --threshold 0.85
 ```
 
+### Non-Automation User PR
+
+```bash
+# First run to get the SHA
+dependamerge https://github.com/myorg/repo1/pull/89
+# Output: To merge this and similar PRs, run again with: --override f1a2b3c4d5e6f7g8
+
+# Second run with the override SHA
+dependamerge https://github.com/myorg/repo1/pull/89 --override f1a2b3c4d5e6f7g8
+```
+
 ### Dry Run with Fix Option
 
 ```bash
@@ -159,11 +217,20 @@ dependamerge https://github.com/myorg/repo1/pull/12 --threshold 0.85
 dependamerge https://github.com/myorg/repo1/pull/78 --dry-run --fix --threshold 0.9
 ```
 
+### Non-Automation PR Example
+
+```bash
+# Step 1: Get the SHA for the non-automation PR
+dependamerge https://github.com/owner/repo/pull/123
+
+# Step 2: Merge using the obtained SHA
+dependamerge https://github.com/owner/repo/pull/123 --override a1b2c3d4e5f6g7h8
+```
+
 ## Safety Features
 
-- **Automation-Focused**: Processes PRs from recognized automation tools
-- **Mergeable Check**: Verifies PRs are in a mergeable state before attempting
-  merge
+### For All PRs
+- **Mergeable Check**: Verifies PRs are in a mergeable state before attempting merge
 - **Auto-Fix**: Automatically update out-of-date branches when using `--fix` option
 - **Detailed Status**: Shows specific reasons why PRs cannot merge
   (conflicts, blocked by checks, etc.)
@@ -171,6 +238,15 @@ dependamerge https://github.com/myorg/repo1/pull/78 --dry-run --fix --threshold 
   incorrect matches
 - **Dry Run Mode**: Always test with `--dry-run` first
 - **Detailed Logging**: Shows which PRs match and why they match
+
+### Additional Security for Automation PRs
+- **Automation-Focused**: Processes PRs from recognized automation tools only
+
+### Additional Security for Non-Automation PRs
+- **SHA-Based Authentication**: Requires unique SHA hash for each author/commit combination
+- **Author Isolation**: Only merges PRs from the same author as source PR
+- **Commit Binding**: SHA changes if commit message changes, preventing replay attacks
+- **No Cross-Author Attacks**: One author's SHA cannot be used for another author's PRs
 
 ## Enhanced URL Support
 

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
+import hashlib
 from unittest.mock import Mock, patch
 
 from typer.testing import CliRunner
 
-from dependamerge.cli import app
+from dependamerge.cli import app, _generate_override_sha, _validate_override_sha
 from dependamerge.models import PullRequestInfo
 
 
@@ -142,12 +143,13 @@ class TestCLI:
             html_url="https://github.com/owner/repo/pull/22",
         )
         mock_client.get_pull_request_info.return_value = mock_pr
+        mock_client.get_pull_request_commits.return_value = ["Fix bug\n\nDetailed description"]
 
         result = self.runner.invoke(
             app, ["https://github.com/owner/repo/pull/22", "--token", "test_token"]
         )
 
-        assert result.exit_code == 1
+        assert result.exit_code == 0
         assert "not from a recognized automation tool" in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")
@@ -233,3 +235,197 @@ class TestCLI:
         mock_client.merge_pull_request.assert_called_once_with(
             "owner", "repo", 22, "merge"
         )
+
+    @patch("dependamerge.cli.GitHubClient")
+    def test_merge_command_non_automation_pr_no_override(self, mock_client_class):
+        """Test that non-automation PR without override shows SHA and exits."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
+        mock_client.is_automation_author.return_value = False
+
+        mock_pr = PullRequestInfo(
+            number=22,
+            title="Fix bug in authentication",
+            body="Test body",
+            author="human-user",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="fix-bug",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+        mock_client.get_pull_request_info.return_value = mock_pr
+        mock_client.get_pull_request_commits.return_value = ["Fix bug in authentication\n\nDetailed description"]
+
+        result = self.runner.invoke(
+            app, ["https://github.com/owner/repo/pull/22", "--token", "test_token"]
+        )
+
+        assert result.exit_code == 0
+        assert "not from a recognized automation tool" in result.stdout
+        assert "--override" in result.stdout
+        assert "human-user" in result.stdout
+
+    @patch("dependamerge.cli.GitHubClient")
+    def test_merge_command_non_automation_pr_invalid_override(self, mock_client_class):
+        """Test that non-automation PR with invalid override SHA fails."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
+        mock_client.is_automation_author.return_value = False
+
+        mock_pr = PullRequestInfo(
+            number=22,
+            title="Fix bug in authentication",
+            body="Test body",
+            author="human-user",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="fix-bug",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+        mock_client.get_pull_request_info.return_value = mock_pr
+        mock_client.get_pull_request_commits.return_value = ["Fix bug in authentication\n\nDetailed description"]
+
+        result = self.runner.invoke(
+            app, [
+                "https://github.com/owner/repo/pull/22",
+                "--token", "test_token",
+                "--override", "invalid_sha"
+            ]
+        )
+
+        assert result.exit_code == 1
+        assert "Invalid override SHA" in result.stdout
+
+    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli.PRComparator")
+    def test_merge_command_non_automation_pr_valid_override(self, mock_comparator_class, mock_client_class):
+        """Test that non-automation PR with valid override SHA proceeds."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        mock_comparator = Mock()
+        mock_comparator_class.return_value = mock_comparator
+
+        mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
+        mock_client.is_automation_author.return_value = False
+
+        mock_pr = PullRequestInfo(
+            number=22,
+            title="Fix bug in authentication",
+            body="Test body",
+            author="human-user",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="fix-bug",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+
+        mock_client.get_pull_request_info.return_value = mock_pr
+        mock_client.get_pull_request_commits.return_value = ["Fix bug in authentication\n\nDetailed description"]
+        mock_client.get_organization_repositories.return_value = []
+        mock_client.get_pr_status_details.return_value = "Ready to merge"
+        mock_client.approve_pull_request.return_value = True
+        mock_client.merge_pull_request.return_value = True
+
+        # Calculate the expected SHA for this test case
+        combined_data = "human-user:Fix bug in authentication"
+        expected_sha = hashlib.sha256(combined_data.encode('utf-8')).hexdigest()[:16]
+
+        result = self.runner.invoke(
+            app, [
+                "https://github.com/owner/repo/pull/22",
+                "--token", "test_token",
+                "--override", expected_sha,
+                "--dry-run"
+            ]
+        )
+
+        assert result.exit_code == 0
+        assert "Override SHA validated" in result.stdout
+
+    def test_generate_override_sha(self):
+        """Test SHA generation functionality."""
+        mock_pr = PullRequestInfo(
+            number=22,
+            title="Fix bug in authentication",
+            body="Test body",
+            author="human-user",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="fix-bug",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+
+        commit_message = "Fix bug in authentication"
+        sha = _generate_override_sha(mock_pr, commit_message)
+
+        # Check that SHA is generated and has expected length
+        assert len(sha) == 16
+        assert isinstance(sha, str)
+
+        # Check that same inputs generate same SHA
+        sha2 = _generate_override_sha(mock_pr, commit_message)
+        assert sha == sha2
+
+        # Check that different inputs generate different SHA
+        mock_pr2 = mock_pr.model_copy()
+        mock_pr2.author = "different-user"
+        sha3 = _generate_override_sha(mock_pr2, commit_message)
+        assert sha != sha3
+
+    def test_validate_override_sha(self):
+        """Test SHA validation functionality."""
+        mock_pr = PullRequestInfo(
+            number=22,
+            title="Fix bug in authentication",
+            body="Test body",
+            author="human-user",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="fix-bug",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+
+        commit_message = "Fix bug in authentication"
+        correct_sha = _generate_override_sha(mock_pr, commit_message)
+
+        # Valid SHA should validate successfully
+        assert _validate_override_sha(correct_sha, mock_pr, commit_message) is True
+
+        # Invalid SHA should fail validation
+        assert _validate_override_sha("invalid_sha", mock_pr, commit_message) is False
+        assert _validate_override_sha("", mock_pr, commit_message) is False

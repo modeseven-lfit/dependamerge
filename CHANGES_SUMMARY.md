@@ -37,9 +37,44 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 - Added helper function `_merge_single_pr()` to reduce code duplication
 - Updated success counting to include source PR
 
+### 5. ✅ Non-Automation PR Support (New Feature)
+
+**Major Enhancement**: Extended tool to support bulk merging of pull requests from standard GitHub users (not just automation tools).
+
+#### New Capabilities
+- **Override Mechanism**: New `--override <SHA>` CLI flag for non-automation PRs
+- **SHA-based Security**: Unique SHA hash generation based on author + commit message
+- **Enhanced Workflow**: Two-step process for secure non-automation PR merging
+
+#### Technical Implementation
+- Added `_generate_override_sha()` and `_validate_override_sha()` functions
+- Enhanced GitHub client with `get_pull_request_commits()` method
+- Updated PR filtering logic to handle both automation and non-automation scenarios
+- Added comprehensive SHA validation before proceeding with merges
+
+#### Security Features
+- **Author Isolation**: Only merges PRs from the same author as source PR
+- **Commit Binding**: SHA changes if commit message changes
+- **No Cross-Author Attacks**: One author's SHA cannot be used for another's PRs
+
+#### Usage Examples
+```bash
+# First run (detects non-automation PR):
+dependamerge https://github.com/org/repo/pull/123
+# Output: To merge this and similar PRs, run again with: --override a1b2c3d4e5f6g7h8
+
+# Second run (with override):
+dependamerge https://github.com/org/repo/pull/123 --override a1b2c3d4e5f6g7h8
+```
+
+#### Testing
+- Added 6 new comprehensive tests for override functionality
+- All existing tests continue to pass (no breaking changes)
+- Enhanced GitHub client tests for commit retrieval
+
 ## Test Results
 
-- **27 tests passing** (all previous + 3 new functionality tests)
+- **36 tests passing** (27 previous + 9 new feature tests)
 - All pre-commit hooks passing
 - Ruff linting: ✅ All checks passed!
 - MyPy type checking: ✅ Success: no issues found in 5 source files
@@ -48,10 +83,11 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 - `README.md` - Fixed linting issues, improved wording
 - `tests/test_functionality_changes.py` - New consolidated test file
-- Removed: `test_changes.py`, `test_source_pr_merge.py` from root directory
+- Cleaned up project structure and removed unnecessary files
 
 ## Project Status
 
 The project is now fully lint-compliant and we properly organized all tests
 in the tests folder. The enhanced URL parsing and source PR merging
-functionality from the previous work remains intact and tested.
+functionality from the previous work remains intact and tested. The new
+non-automation PR support feature is also fully implemented and tested.

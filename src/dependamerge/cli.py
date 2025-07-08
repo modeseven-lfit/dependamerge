@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
+import hashlib
 from typing import List, Optional, Tuple
 
 import typer
@@ -16,6 +17,47 @@ app = typer.Typer(
     help="Automatically merge pull requests created by automation tools across GitHub organizations"
 )
 console = Console()
+
+
+def _generate_override_sha(pr_info: PullRequestInfo, commit_message_first_line: str) -> str:
+    """
+    Generate a SHA hash based on PR author info and commit message.
+
+    Args:
+        pr_info: Pull request information containing author details
+        commit_message_first_line: First line of the commit message to use as salt
+
+    Returns:
+        SHA256 hash string
+    """
+    # Create a string combining author info and commit message first line
+    combined_data = f"{pr_info.author}:{commit_message_first_line.strip()}"
+
+    # Generate SHA256 hash
+    sha_hash = hashlib.sha256(combined_data.encode('utf-8')).hexdigest()
+
+    # Return first 16 characters for readability
+    return sha_hash[:16]
+
+
+def _validate_override_sha(
+    provided_sha: str,
+    pr_info: PullRequestInfo,
+    commit_message_first_line: str
+) -> bool:
+    """
+    Validate that the provided SHA matches the expected one for this PR.
+
+    Args:
+        provided_sha: SHA provided by user via --override flag
+        pr_info: Pull request information
+        commit_message_first_line: First line of commit message
+
+    Returns:
+        True if SHA is valid, False otherwise
+    """
+    expected_sha = _generate_override_sha(pr_info, commit_message_first_line)
+    return provided_sha == expected_sha
 
 
 @app.command()
@@ -36,6 +78,9 @@ def merge(
     fix: bool = typer.Option(
         False, "--fix", help="Automatically fix out-of-date branches before merging"
     ),
+    override: Optional[str] = typer.Option(
+        None, "--override", help="SHA hash to override non-automation PR restriction"
+    ),
 ):
     """
     Merge automation pull requests across an organization.
@@ -44,6 +89,14 @@ def merge(
     1. Analyze the provided PR
     2. Find similar PRs in the organization
     3. Approve and merge matching PRs
+
+    For automation PRs (dependabot, pre-commit-ci, etc.):
+    - Merges similar PRs from the same automation tool
+
+    For non-automation PRs:
+    - Requires --override flag with SHA hash
+    - Only merges PRs from the same author
+    - SHA is generated from author + commit message
     """
     try:
         # Initialize clients
@@ -61,12 +114,38 @@ def merge(
         # Display source PR info
         _display_pr_info(source_pr, "Source PR")
 
-        # Check if source PR is from automation
+        # Check if source PR is from automation or has valid override
         if not github_client.is_automation_author(source_pr.author):
+            # Get commit messages to generate SHA
+            commit_messages = github_client.get_pull_request_commits(owner, repo_name, pr_number)
+            first_commit_line = commit_messages[0].split('\n')[0] if commit_messages else ""
+
+            # Generate expected SHA for this PR
+            expected_sha = _generate_override_sha(source_pr, first_commit_line)
+
+            if not override:
+                console.print(
+                    "[yellow]Source PR is not from a recognized automation tool.[/yellow]"
+                )
+                console.print(
+                    f"[yellow]To merge this and similar PRs, run again with: --override {expected_sha}[/yellow]"
+                )
+                console.print(
+                    f"[dim]This SHA is based on the author '{source_pr.author}' and commit message '{first_commit_line[:50]}...'[/dim]"
+                )
+                return
+
+            # Validate provided override SHA
+            if not _validate_override_sha(override, source_pr, first_commit_line):
+                console.print(
+                    "[red]Error: Invalid override SHA. Expected SHA for this PR and author is:[/red]"
+                )
+                console.print(f"[red]--override {expected_sha}[/red]")
+                raise typer.Exit(1)
+
             console.print(
-                "[red]Error: Source PR is not from a recognized automation tool[/red]"
+                "[green]Override SHA validated. Proceeding with non-automation PR merge.[/green]"
             )
-            raise typer.Exit(1)
 
         # Get organization repositories
         console.print(f"\n[bold blue]Scanning organization: {owner}[/bold blue]")
@@ -103,8 +182,19 @@ def merge(
             open_prs = github_client.get_open_pull_requests(repo)
 
             for pr in open_prs:
-                if not github_client.is_automation_author(pr.user.login):
-                    continue
+                # Check if PR should be considered based on override status
+                is_automation = github_client.is_automation_author(pr.user.login)
+
+                # If source PR is automation, only consider automation PRs
+                # If source PR is non-automation with override, only consider non-automation PRs from same author
+                source_is_automation = github_client.is_automation_author(source_pr.author)
+
+                if source_is_automation:
+                    if not is_automation:
+                        continue
+                else:
+                    if is_automation or pr.user.login != source_pr.author:
+                        continue
 
                 try:
                     target_pr = github_client.get_pull_request_info(
