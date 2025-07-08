@@ -125,3 +125,50 @@ class TestGitHubClient:
         assert client.is_automation_author("renovate[bot]")
         assert not client.is_automation_author("human-user")
         assert not client.is_automation_author("random-bot")
+
+    @patch("dependamerge.github_client.Github")
+    def test_get_pull_request_commits(self, mock_github_class):
+        mock_github = Mock()
+        mock_github_class.return_value = mock_github
+
+        # Mock repository and PR
+        mock_repo = Mock()
+        mock_github.get_repo.return_value = mock_repo
+
+        mock_pr = Mock()
+        mock_repo.get_pull.return_value = mock_pr
+
+        # Mock commits
+        mock_commit1 = Mock()
+        mock_commit1.commit.message = "Fix bug in authentication\n\nDetailed description"
+        mock_commit2 = Mock()
+        mock_commit2.commit.message = "Update tests"
+
+        mock_pr.get_commits.return_value = [mock_commit1, mock_commit2]
+
+        client = GitHubClient(token="test_token")
+        commits = client.get_pull_request_commits("owner", "repo", 22)
+
+        assert len(commits) == 2
+        assert commits[0] == "Fix bug in authentication\n\nDetailed description"
+        assert commits[1] == "Update tests"
+
+        mock_github.get_repo.assert_called_once_with("owner/repo")
+        mock_repo.get_pull.assert_called_once_with(22)
+
+    @patch("dependamerge.github_client.Github")
+    def test_get_pull_request_commits_empty(self, mock_github_class):
+        mock_github = Mock()
+        mock_github_class.return_value = mock_github
+
+        mock_repo = Mock()
+        mock_github.get_repo.return_value = mock_repo
+
+        mock_pr = Mock()
+        mock_repo.get_pull.return_value = mock_pr
+        mock_pr.get_commits.return_value = []
+
+        client = GitHubClient(token="test_token")
+        commits = client.get_pull_request_commits("owner", "repo", 22)
+
+        assert commits == []
