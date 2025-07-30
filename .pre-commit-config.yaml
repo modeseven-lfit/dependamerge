@@ -62,6 +62,8 @@ repos:
     rev: 850d8bf806620ef89a99381c5cf5ea2c1ea826dd  # frozen: v1.17.0
     hooks:
       - id: mypy
+        args: [--config-file=pyproject.toml]
+        additional_dependencies: [types-requests]
 
   - repo: https://github.com/btford/write-good
     rev: ab66ce10136dfad5146e69e70f82a3efac8842c1 # frozen: v1.0.8

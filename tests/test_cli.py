@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from typer.testing import CliRunner
 
-from dependamerge.cli import app, _generate_override_sha, _validate_override_sha
+from dependamerge.cli import _generate_override_sha, _validate_override_sha, app
 from dependamerge.models import PullRequestInfo
 
 
@@ -143,7 +143,10 @@ class TestCLI:
             html_url="https://github.com/owner/repo/pull/22",
         )
         mock_client.get_pull_request_info.return_value = mock_pr
-        mock_client.get_pull_request_commits.return_value = ["Fix bug\n\nDetailed description"]
+        mock_client.get_pull_request_commits.return_value = [
+            "Fix bug\n\nDetailed description"
+        ]
+        mock_client.get_pr_status_details.return_value = "Ready to merge"
 
         result = self.runner.invoke(
             app, ["https://github.com/owner/repo/pull/22", "--token", "test_token"]
@@ -262,7 +265,10 @@ class TestCLI:
             html_url="https://github.com/owner/repo/pull/22",
         )
         mock_client.get_pull_request_info.return_value = mock_pr
-        mock_client.get_pull_request_commits.return_value = ["Fix bug in authentication\n\nDetailed description"]
+        mock_client.get_pull_request_commits.return_value = [
+            "Fix bug in authentication\n\nDetailed description"
+        ]
+        mock_client.get_pr_status_details.return_value = "Ready to merge"
 
         result = self.runner.invoke(
             app, ["https://github.com/owner/repo/pull/22", "--token", "test_token"]
@@ -299,14 +305,20 @@ class TestCLI:
             html_url="https://github.com/owner/repo/pull/22",
         )
         mock_client.get_pull_request_info.return_value = mock_pr
-        mock_client.get_pull_request_commits.return_value = ["Fix bug in authentication\n\nDetailed description"]
+        mock_client.get_pull_request_commits.return_value = [
+            "Fix bug in authentication\n\nDetailed description"
+        ]
+        mock_client.get_pr_status_details.return_value = "Ready to merge"
 
         result = self.runner.invoke(
-            app, [
+            app,
+            [
                 "https://github.com/owner/repo/pull/22",
-                "--token", "test_token",
-                "--override", "invalid_sha"
-            ]
+                "--token",
+                "test_token",
+                "--override",
+                "invalid_sha",
+            ],
         )
 
         assert result.exit_code == 1
@@ -314,7 +326,9 @@ class TestCLI:
 
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.PRComparator")
-    def test_merge_command_non_automation_pr_valid_override(self, mock_comparator_class, mock_client_class):
+    def test_merge_command_non_automation_pr_valid_override(
+        self, mock_comparator_class, mock_client_class
+    ):
         """Test that non-automation PR with valid override SHA proceeds."""
         mock_client = Mock()
         mock_client_class.return_value = mock_client
@@ -343,7 +357,9 @@ class TestCLI:
         )
 
         mock_client.get_pull_request_info.return_value = mock_pr
-        mock_client.get_pull_request_commits.return_value = ["Fix bug in authentication\n\nDetailed description"]
+        mock_client.get_pull_request_commits.return_value = [
+            "Fix bug in authentication\n\nDetailed description"
+        ]
         mock_client.get_organization_repositories.return_value = []
         mock_client.get_pr_status_details.return_value = "Ready to merge"
         mock_client.approve_pull_request.return_value = True
@@ -351,15 +367,18 @@ class TestCLI:
 
         # Calculate the expected SHA for this test case
         combined_data = "human-user:Fix bug in authentication"
-        expected_sha = hashlib.sha256(combined_data.encode('utf-8')).hexdigest()[:16]
+        expected_sha = hashlib.sha256(combined_data.encode("utf-8")).hexdigest()[:16]
 
         result = self.runner.invoke(
-            app, [
+            app,
+            [
                 "https://github.com/owner/repo/pull/22",
-                "--token", "test_token",
-                "--override", expected_sha,
-                "--dry-run"
-            ]
+                "--token",
+                "test_token",
+                "--override",
+                expected_sha,
+                "--dry-run",
+            ],
         )
 
         assert result.exit_code == 0

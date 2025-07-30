@@ -69,7 +69,6 @@ def test_final_verification():
             similarity_threshold=0.8,
             merge_method="merge",
             token="test_token",
-            fix=False,
         )
 
         # Verify that the source PR was approved and merged

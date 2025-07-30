@@ -4,7 +4,9 @@
 import hashlib
 from typing import List, Optional, Tuple
 
+import requests
 import typer
+import urllib3.exceptions
 from github.Repository import Repository
 from rich.console import Console
 from rich.table import Table
@@ -13,13 +15,18 @@ from .github_client import GitHubClient
 from .models import ComparisonResult, PullRequestInfo
 from .pr_comparator import PRComparator
 
+# Constants
+MAX_RETRIES = 2
+
 app = typer.Typer(
     help="Automatically merge pull requests created by automation tools across GitHub organizations"
 )
-console = Console()
+console = Console(markup=False)
 
 
-def _generate_override_sha(pr_info: PullRequestInfo, commit_message_first_line: str) -> str:
+def _generate_override_sha(
+    pr_info: PullRequestInfo, commit_message_first_line: str
+) -> str:
     """
     Generate a SHA hash based on PR author info and commit message.
 
@@ -34,16 +41,14 @@ def _generate_override_sha(pr_info: PullRequestInfo, commit_message_first_line: 
     combined_data = f"{pr_info.author}:{commit_message_first_line.strip()}"
 
     # Generate SHA256 hash
-    sha_hash = hashlib.sha256(combined_data.encode('utf-8')).hexdigest()
+    sha_hash = hashlib.sha256(combined_data.encode("utf-8")).hexdigest()
 
     # Return first 16 characters for readability
     return sha_hash[:16]
 
 
 def _validate_override_sha(
-    provided_sha: str,
-    pr_info: PullRequestInfo,
-    commit_message_first_line: str
+    provided_sha: str, pr_info: PullRequestInfo, commit_message_first_line: str
 ) -> bool:
     """
     Validate that the provided SHA matches the expected one for this PR.
@@ -75,9 +80,6 @@ def merge(
     token: Optional[str] = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
     ),
-    fix: bool = typer.Option(
-        False, "--fix", help="Automatically fix out-of-date branches before merging"
-    ),
     override: Optional[str] = typer.Option(
         None, "--override", help="SHA hash to override non-automation PR restriction"
     ),
@@ -103,52 +105,70 @@ def merge(
         github_client = GitHubClient(token)
         comparator = PRComparator(similarity_threshold)
 
-        console.print(f"[bold blue]Analyzing PR: {pr_url}[/bold blue]")
+        console.print(f"Analyzing PR: {pr_url}")
 
         # Parse PR URL and get info
         owner, repo_name, pr_number = github_client.parse_pr_url(pr_url)
-        source_pr: PullRequestInfo = github_client.get_pull_request_info(
-            owner, repo_name, pr_number
-        )
+
+        try:
+            source_pr: PullRequestInfo = github_client.get_pull_request_info(
+                owner, repo_name, pr_number
+            )
+        except (
+            urllib3.exceptions.NameResolutionError,
+            urllib3.exceptions.MaxRetryError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.RequestException,
+        ) as e:
+            console.print(
+                "Network Error: Failed to connect to GitHub API while fetching source PR."
+            )
+            console.print(f"Details: {e}")
+            console.print("Please check your internet connection and try again.")
+            raise typer.Exit(1) from e
 
         # Display source PR info
-        _display_pr_info(source_pr, "Source PR")
+        _display_pr_info(source_pr, "Source PR", github_client)
 
         # Check if source PR is from automation or has valid override
         if not github_client.is_automation_author(source_pr.author):
             # Get commit messages to generate SHA
-            commit_messages = github_client.get_pull_request_commits(owner, repo_name, pr_number)
-            first_commit_line = commit_messages[0].split('\n')[0] if commit_messages else ""
+            commit_messages = github_client.get_pull_request_commits(
+                owner, repo_name, pr_number
+            )
+            first_commit_line = (
+                commit_messages[0].split("\n")[0] if commit_messages else ""
+            )
 
             # Generate expected SHA for this PR
             expected_sha = _generate_override_sha(source_pr, first_commit_line)
 
             if not override:
+                console.print("Source PR is not from a recognized automation tool.")
                 console.print(
-                    "[yellow]Source PR is not from a recognized automation tool.[/yellow]"
+                    f"To merge this and similar PRs, run again with: --override {expected_sha}"
                 )
                 console.print(
-                    f"[yellow]To merge this and similar PRs, run again with: --override {expected_sha}[/yellow]"
-                )
-                console.print(
-                    f"[dim]This SHA is based on the author '{source_pr.author}' and commit message '{first_commit_line[:50]}...'[/dim]"
+                    f"This SHA is based on the author '{source_pr.author}' and commit message '{first_commit_line[:50]}...'",
+                    style="dim",
                 )
                 return
 
             # Validate provided override SHA
             if not _validate_override_sha(override, source_pr, first_commit_line):
                 console.print(
-                    "[red]Error: Invalid override SHA. Expected SHA for this PR and author is:[/red]"
+                    "Error: Invalid override SHA. Expected SHA for this PR and author is:"
                 )
-                console.print(f"[red]--override {expected_sha}[/red]")
+                console.print(f"--override {expected_sha}")
                 raise typer.Exit(1)
 
             console.print(
-                "[green]Override SHA validated. Proceeding with non-automation PR merge.[/green]"
+                "Override SHA validated. Proceeding with non-automation PR merge."
             )
 
         # Get organization repositories
-        console.print(f"\n[bold blue]Scanning organization: {owner}[/bold blue]")
+        console.print(f"\nScanning organization: {owner}")
 
         # TEMP: Remove progress for debugging
         # with Progress(
@@ -157,9 +177,23 @@ def merge(
         #     console=console,
         # ) as progress:
         #     task = progress.add_task("Fetching repositories...", total=None)
-        repositories: List[Repository] = github_client.get_organization_repositories(
-            owner
-        )
+        try:
+            repositories: List[Repository] = (
+                github_client.get_organization_repositories(owner)
+            )
+        except (
+            urllib3.exceptions.NameResolutionError,
+            urllib3.exceptions.MaxRetryError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.RequestException,
+        ) as e:
+            console.print(
+                "Network Error: Failed to connect to GitHub API while fetching organization repositories."
+            )
+            console.print(f"Details: {e}")
+            console.print("Please check your internet connection and try again.")
+            raise typer.Exit(1) from e
         console.print(f"Found {len(repositories)} repositories")
         #     progress.update(task, description=f"Found {len(repositories)} repositories")
 
@@ -187,7 +221,9 @@ def merge(
 
                 # If source PR is automation, only consider automation PRs
                 # If source PR is non-automation with override, only consider non-automation PRs from same author
-                source_is_automation = github_client.is_automation_author(source_pr.author)
+                source_is_automation = github_client.is_automation_author(
+                    source_pr.author
+                )
 
                 if source_is_automation:
                     if not is_automation:
@@ -206,20 +242,34 @@ def merge(
                     if comparison.is_similar:
                         similar_prs.append((target_pr, comparison))
 
+                except (
+                    urllib3.exceptions.NameResolutionError,
+                    urllib3.exceptions.MaxRetryError,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.RequestException,
+                ) as e:
+                    console.print(
+                        "Network Error: Failed to connect to GitHub API while analyzing PRs."
+                    )
+                    console.print(f"Details: {e}")
+                    console.print(
+                        "Please check your internet connection and try again."
+                    )
+                    raise typer.Exit(1) from e
                 except Exception as e:
                     console.print(
-                        f"[yellow]Warning: Failed to analyze PR {pr.number} in {repo.full_name}: {e}[/yellow]"
+                        f"Warning: Failed to analyze PR {pr.number} in {repo.full_name}: {e}",
+                        style="yellow",
                     )
 
             # progress.advance(task)
 
         # Display results
         if not similar_prs:
-            console.print("\n[yellow]No similar PRs found in the organization[/yellow]")
+            console.print("\nNo similar PRs found in the organization")
         else:
-            console.print(
-                f"\n[bold green]Found {len(similar_prs)} similar PR(s)[/bold green]"
-            )
+            console.print(f"\nFound {len(similar_prs)} similar PR(s)")
 
             # Display similar PRs table
             table = Table(title="Similar Pull Requests")
@@ -236,12 +286,17 @@ def merge(
                 # Get detailed status information
                 status = github_client.get_pr_status_details(pr_info)
 
+                # Display title with proper truncation
+                display_title = (
+                    pr_info.title[:50] + "..."
+                    if len(pr_info.title) > 50
+                    else pr_info.title
+                )
+
                 table.add_row(
                     repo_name,
                     str(pr_info.number),
-                    pr_info.title[:50] + "..."
-                    if len(pr_info.title) > 50
-                    else pr_info.title,
+                    display_title,
                     f"{comparison.confidence_score:.2f}",
                     status,
                 )
@@ -250,45 +305,48 @@ def merge(
 
         # Merge PRs
         if dry_run:
-            console.print("\n[yellow]Dry run mode - no changes will be made[/yellow]")
+            console.print("\nDry run mode - no changes will be made")
             return
 
         success_count = 0
         # Merge similar PRs if any were found
         for pr_info, _comparison in similar_prs:
-            if _merge_single_pr(pr_info, github_client, merge_method, fix, console):
+            if _merge_single_pr(pr_info, github_client, merge_method, console):
                 success_count += 1
 
         # Always merge source PR (whether similar PRs were found or not)
-        console.print(f"\n[bold blue]Merging source PR {source_pr.number}[/bold blue]")
+        console.print(f"\nMerging source PR {source_pr.number}")
         source_pr_merged = _merge_single_pr(
-            source_pr, github_client, merge_method, fix, console
+            source_pr, github_client, merge_method, console
         )
         if source_pr_merged:
             success_count += 1
 
         total_prs = len(similar_prs) + 1  # similar PRs + source PR
         console.print(
-            f"\n[bold green]Successfully merged {success_count}/{total_prs} PRs (including source PR)[/bold green]"
+            f"\nSuccessfully merged {success_count}/{total_prs} PRs (including source PR)"
         )
 
     except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"Error: {e}")
         raise typer.Exit(1) from e
 
 
-def _display_pr_info(pr: PullRequestInfo, title: str):
+def _display_pr_info(pr: PullRequestInfo, title: str, github_client: GitHubClient):
     """Display pull request information in a formatted table."""
     table = Table(title=title)
     table.add_column("Property", style="cyan")
     table.add_column("Value", style="green")
+
+    # Get proper status instead of raw mergeable field
+    status = github_client.get_pr_status_details(pr)
 
     table.add_row("Repository", pr.repository_full_name)
     table.add_row("PR Number", str(pr.number))
     table.add_row("Title", pr.title)
     table.add_row("Author", pr.author)
     table.add_row("State", pr.state)
-    table.add_row("Mergeable", str(pr.mergeable))
+    table.add_row("Status", status)
     table.add_row("Files Changed", str(len(pr.files_changed)))
     table.add_row("URL", pr.html_url)
 
@@ -299,7 +357,6 @@ def _merge_single_pr(
     pr_info: PullRequestInfo,
     github_client: GitHubClient,
     merge_method: str,
-    fix: bool,
     console: Console,
 ) -> bool:
     """
@@ -309,56 +366,93 @@ def _merge_single_pr(
     """
     repo_owner, repo_name = pr_info.repository_full_name.split("/")
 
-    # Check if PR needs fixing
-    if not pr_info.mergeable and fix:
-        status = github_client.get_pr_status_details(pr_info)
-        if "Rebase required" in status:
-            console.print(
-                f"[blue]Fixing out-of-date PR {pr_info.number} in {pr_info.repository_full_name}[/blue]"
-            )
-            if github_client.fix_out_of_date_pr(repo_owner, repo_name, pr_info.number):
-                console.print(
-                    f"[green]✓ Successfully updated PR {pr_info.number}[/green]"
-                )
-                # Refresh PR info after fix
-                try:
-                    pr_info = github_client.get_pull_request_info(
-                        repo_owner, repo_name, pr_info.number
-                    )
-                except Exception as e:
-                    console.print(
-                        f"[yellow]Warning: Failed to refresh PR info: {e}[/yellow]"
-                    )
-            else:
-                console.print(f"[red]✗ Failed to update PR {pr_info.number}[/red]")
-                return False
+    # Get initial status
+    status = github_client.get_pr_status_details(pr_info)
 
-    if not pr_info.mergeable:
-        status = github_client.get_pr_status_details(pr_info)
+    # Handle different types of blocks intelligently
+    if pr_info.mergeable_state == "blocked" and pr_info.mergeable is True:
+        # This is likely blocked by branch protection (review required, etc.)
+        # Don't show "attempting anyway" message since this is expected and handleable
+        pass
+    elif pr_info.mergeable_state == "blocked" and pr_info.mergeable is False:
         console.print(
-            f"[yellow]Skipping unmergeable PR {pr_info.number} in {pr_info.repository_full_name} ({status})[/yellow]"
+            f"PR {pr_info.number} is blocked by failing checks - attempting merge anyway"
+        )
+    elif not pr_info.mergeable:
+        console.print(
+            f"Skipping unmergeable PR {pr_info.number} in {pr_info.repository_full_name} ({status})"
         )
         return False
 
     # Approve PR
-    console.print(
-        f"[blue]Approving PR {pr_info.number} in {pr_info.repository_full_name}[/blue]"
-    )
-    if github_client.approve_pull_request(repo_owner, repo_name, pr_info.number):
-        # Merge PR
-        console.print(
-            f"[blue]Merging PR {pr_info.number} in {pr_info.repository_full_name}[/blue]"
-        )
-        if github_client.merge_pull_request(
-            repo_owner, repo_name, pr_info.number, merge_method
-        ):
-            console.print(f"[green]✓ Successfully merged PR {pr_info.number}[/green]")
-            return True
-        else:
-            console.print(f"[red]✗ Failed to merge PR {pr_info.number}[/red]")
-    else:
-        console.print(f"[red]✗ Failed to approve PR {pr_info.number}[/red]")
+    console.print(f"Approving PR {pr_info.number} in {pr_info.repository_full_name}")
+    if not github_client.approve_pull_request(repo_owner, repo_name, pr_info.number):
+        console.print(f"Failed to approve PR {pr_info.number} ❌")
+        return False
 
+    # Attempt merge with retry logic for different failure conditions
+    for attempt in range(MAX_RETRIES + 1):
+        console.print(
+            f"Merging PR {pr_info.number} in {pr_info.repository_full_name} (attempt {attempt + 1})"
+        )
+
+        merge_result = github_client.merge_pull_request(
+            repo_owner, repo_name, pr_info.number, merge_method
+        )
+
+        if merge_result:
+            console.print(f"Successfully merged PR {pr_info.number} ✅")
+            return True
+
+        # If merge failed, check if we can fix the issue and retry
+        if attempt < MAX_RETRIES:
+            # Only refresh PR info if current state suggests it might be fixable
+            should_retry = False
+
+            if (
+                pr_info.mergeable_state == "behind"
+                or pr_info.mergeable_state == "unknown"
+            ):
+                # These states might benefit from refreshing and potentially fixing
+                try:
+                    updated_pr_info = github_client.get_pull_request_info(
+                        repo_owner, repo_name, pr_info.number
+                    )
+
+                    # Check if branch is out of date and can be fixed
+                    if updated_pr_info.mergeable_state == "behind":
+                        console.print(
+                            f"PR {pr_info.number} is out of date - updating branch and retrying"
+                        )
+                        if github_client.fix_out_of_date_pr(
+                            repo_owner, repo_name, pr_info.number
+                        ):
+                            console.print(
+                                f"Successfully updated PR {pr_info.number} branch ✅"
+                            )
+                            pr_info = updated_pr_info  # Update for next attempt
+                            should_retry = True
+                        else:
+                            console.print(
+                                f"Failed to update PR {pr_info.number} branch ❌"
+                            )
+                    elif updated_pr_info.mergeable_state != pr_info.mergeable_state:
+                        # State changed, worth retrying with new state
+                        pr_info = updated_pr_info
+                        should_retry = True
+
+                except Exception as e:
+                    console.print(f"Warning: Failed to refresh PR info for retry: {e}")
+
+            if should_retry:
+                continue
+            else:
+                # Other types of merge failures - no point in retrying
+                break
+
+    console.print(
+        f"Failed to merge PR {pr_info.number} after {MAX_RETRIES + 1} attempts ❌"
+    )
     return False
 
 

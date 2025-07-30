@@ -140,7 +140,9 @@ class TestGitHubClient:
 
         # Mock commits
         mock_commit1 = Mock()
-        mock_commit1.commit.message = "Fix bug in authentication\n\nDetailed description"
+        mock_commit1.commit.message = (
+            "Fix bug in authentication\n\nDetailed description"
+        )
         mock_commit2 = Mock()
         mock_commit2.commit.message = "Update tests"
 
