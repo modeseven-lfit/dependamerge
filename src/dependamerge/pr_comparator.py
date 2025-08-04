@@ -78,7 +78,18 @@ class PRComparator:
 
     def _compare_titles(self, title1: str, title2: str) -> float:
         """Compare PR titles for similarity."""
-        # Normalize titles by removing version numbers and specific details
+        # For dependency updates, check if they're updating the same package
+        package1 = self._extract_package_name(title1)
+        package2 = self._extract_package_name(title2)
+
+        # If both are dependency updates, they must update the same package
+        if package1 and package2:
+            if package1 == package2:
+                return 1.0  # Same package update - very similar
+            else:
+                return 0.0  # Different packages - not similar
+
+        # Fall back to original logic for non-dependency updates
         normalized1 = self._normalize_title(title1)
         normalized2 = self._normalize_title(title2)
 
@@ -116,3 +127,32 @@ class PRComparator:
         # Remove version-specific parts from filenames
         filename = re.sub(r"v?\d+\.\d+\.\d+(?:\.\d+)?", "", filename)
         return filename.lower()
+
+    def _extract_package_name(self, title: str) -> str:
+        """Extract package name from dependency update titles.
+
+        Returns empty string if not a recognized dependency update pattern.
+        """
+        title_lower = title.lower()
+
+        # Common dependency update patterns
+        patterns = [
+            # "Bump package from X to Y" or "Chore: Bump package from X to Y"
+            r"(?:chore:\s*)?bump\s+([^\s]+)\s+from\s+",
+            # "Update package from X to Y"
+            r"(?:chore:\s*)?update\s+([^\s]+)\s+from\s+",
+            # "Upgrade package from X to Y"
+            r"(?:chore:\s*)?upgrade\s+([^\s]+)\s+from\s+",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, title_lower)
+            if match:
+                package = match.group(1)
+                # Clean up the package name
+                package = package.strip()
+                # Remove common prefixes that might vary
+                package = re.sub(r'^["\']|["\']$', '', package)  # Remove quotes
+                return package
+
+        return ""
