@@ -7,7 +7,7 @@ name: 'Python Build/Test/Release'
 
 # yamllint disable-line rule:truthy
 on:
-  # Trigger on tag push events
+  # Trigger on tag push events
   push:
     tags:
       - '**'
@@ -25,6 +25,7 @@ jobs:
       tag: "${{ steps.tag-validate.outputs.tag }}"
     steps:
       # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: 'audit'
@@ -45,26 +46,28 @@ jobs:
       artefact_name: "${{ steps.python-build.outputs.artefact_name }}"
       artefact_path: "${{ steps.python-build.outputs.artefact_path }}"
     permissions:
-      contents: write
-      id-token: write       # Needed for attestations
-      attestations: write   # Needed for attestations
+      contents: read
+      id-token: write       # Needed for attestations
+      attestations: write   # Needed for attestations
     timeout-minutes: 12
     env:
       GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
     steps:
       # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: 'audit'
 
+      # yamllint disable-line rule:line-length
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: 'Build Python project'
         id: 'python-build'
         # yamllint disable-line rule:line-length
-        uses: modeseven-lfreleng-actions/python-build-action@update-action # Testing
+        # uses: modeseven-lfreleng-actions/python-build-action@update-action # Testing
         # yamllint disable-line rule:line-length
-        # uses: lfreleng-actions/python-build-action@a9d0ef8a2324ac76e798ad6dc306f08b83b5b213 # v0.1.11
+        uses: lfreleng-actions/python-build-action@18710c51c6d86a1788d96bdf391d81ff7b7d8e4d # v0.1.13
         with:
           sigstore_sign: true
           attestations: true
@@ -73,7 +76,7 @@ jobs:
     name: 'Python Tests'
     runs-on: 'ubuntu-24.04'
     needs: 'python-build'
-    # Matrix job
+    # Matrix job
     strategy:
       fail-fast: false
       matrix: "${{ fromJson(needs.python-build.outputs.matrix_json) }}"
@@ -82,10 +85,12 @@ jobs:
     timeout-minutes: 12
     steps:
       # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: 'audit'
 
+      # yamllint disable-line rule:line-length
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: 'Test Python project [PYTEST]'
@@ -98,7 +103,7 @@ jobs:
     name: 'Python Audit'
     runs-on: 'ubuntu-24.04'
     needs: 'python-build'
-    # Matrix job
+    # Matrix job
     strategy:
       fail-fast: false
       matrix: "${{ fromJson(needs.python-build.outputs.matrix_json) }}"
@@ -107,10 +112,12 @@ jobs:
     timeout-minutes: 10
     steps:
       # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: 'audit'
 
+      # yamllint disable-line rule:line-length
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: 'Audit Python project'
@@ -118,7 +125,6 @@ jobs:
         uses: lfreleng-actions/python-audit-action@bab5316468c108870eb759ef0de622bae9239aad # v0.2.2
         with:
           python_version: "${{ matrix.python-version }}"
-
 
   test-pypi:
     name: 'Test PyPI Publishing'
@@ -131,14 +137,16 @@ jobs:
       name: 'development'
     permissions:
       contents: read
-      id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
+      id-token: write # IMPORTANT: mandatory for trusted publishing
     timeout-minutes: 5
     steps:
       # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: 'audit'
 
+      # yamllint disable-line rule:line-length
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: 'Test PyPI publishing'
@@ -158,14 +166,16 @@ jobs:
       name: 'production'
     permissions:
       contents: read
-      id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
+      id-token: write # IMPORTANT: mandatory for trusted publishing
     timeout-minutes: 5
     steps:
       # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: 'audit'
 
+      # yamllint disable-line rule:line-length
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: 'PyPI release'
@@ -185,8 +195,7 @@ jobs:
       - 'pypi'
     runs-on: 'ubuntu-24.04'
     permissions:
-      contents: write
-      # id-token: write
+      contents: write # IMPORTANT: needed to edit a draft release and promote it
     timeout-minutes: 2
     outputs:
       release_url: "${{ steps.promote-release.outputs.release_url }}"
@@ -211,7 +220,7 @@ jobs:
 
   # Need to attach build artefacts to the release
   # This step could potentially be moved
-  # (May be better to when/where the release is still in draft state)
+  # (May be better to when/where the release is still in draft state)
   attach-artefacts:
     name: 'Attach Artefacts to Release'
     runs-on: 'ubuntu-24.04'
@@ -220,10 +229,11 @@ jobs:
       - 'python-build'
       - 'promote-release'
     permissions:
-      contents: write
+      contents: write # IMPORTANT: needed to edit release, attach artefacts
     timeout-minutes: 5
     steps:
       # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: 'audit'
