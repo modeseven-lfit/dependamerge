@@ -13,7 +13,7 @@ description = "Automatically merge pull requests created by automation tools acr
 authors = [
     {name = "Matthew Watkins", email = "93649628+ModeSevenIndustrialSolutions@users.noreply.github.com" }
 ]
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
