@@ -392,9 +392,14 @@ def _merge_single_pr(
 
     # Attempt merge with retry logic for different failure conditions
     for attempt in range(MAX_RETRIES + 1):
-        console.print(
-            f"Merging PR {pr_info.number} in {pr_info.repository_full_name} (attempt {attempt + 1})"
-        )
+        if attempt == 0:
+            console.print(
+                f"Merging PR {pr_info.number} in {pr_info.repository_full_name}"
+            )
+        else:
+            console.print(
+                f"Merging PR {pr_info.number} in {pr_info.repository_full_name} (retry {attempt})"
+            )
 
         merge_result = github_client.merge_pull_request(
             repo_owner, repo_name, pr_info.number, merge_method
@@ -450,9 +455,14 @@ def _merge_single_pr(
                 # Other types of merge failures - no point in retrying
                 break
 
-    console.print(
-        f"Failed to merge PR {pr_info.number} after {MAX_RETRIES + 1} attempts ❌"
-    )
+    if MAX_RETRIES > 0:
+        console.print(
+            f"Failed to merge PR {pr_info.number} after {MAX_RETRIES} retries ❌"
+        )
+    else:
+        console.print(
+            f"Failed to merge PR {pr_info.number} ❌"
+        )
     return False
 
 
