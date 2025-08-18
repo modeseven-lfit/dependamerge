@@ -5,45 +5,68 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # Dependamerge
 
-Automatically merge similar pull requests across GitHub organizations,
-supporting both automation tools (like Dependabot, pre-commit.ci, Renovate)
-and regular GitHub users.
+Scan GitHub organizations for unmergeable pull requests and automatically merge
+similar pull requests across GitHub organizations, supporting both automation
+tools (like Dependabot, pre-commit.ci, Renovate) and regular GitHub users.
 
 ## Overview
 
-Dependamerge analyzes a source pull request and finds similar pull requests
-across all repositories in the same GitHub organization. It then automatically
-approves and merges the matching PRs, saving time on routine dependency updates,
-automated maintenance tasks, and coordinated changes across all repositories.
+Dependamerge provides two main functions:
 
-**Supports two types of pull requests:**
+1. **Organization Scanning**: Scan entire GitHub organizations to identify
+   pull requests with conflicts, failing checks, or other blocking issues
+2. **Automated Merging**: Analyze a source pull request and find similar pull
+   requests across all repositories in the same GitHub organization, then
+   automatically approve and merge the matching PRs
 
-- **Automation PRs**: From tools like Dependabot, pre-commit.ci, Renovate
-  (original functionality)
-- **Non-Automation PRs**: From regular GitHub users with SHA-based security
-  validation (new feature)
+This saves time on routine dependency updates, maintenance tasks, and
+coordinated changes across all repositories while providing visibility into
+unmergeable PRs that need attention.
+
+**Works with any pull request** regardless of author, automation tool, or origin.
 
 ## Features
 
-- **Automated PR Detection**: Identifies pull requests created by popular
-  automation tools
-- **Non-Automation PR Support**: Handles PRs from regular GitHub users with
-  SHA-based security validation
+### Organization Scanning
+
+- **Comprehensive PR Analysis**: Scans all repositories in a GitHub
+  organization for unmergeable pull requests
+- **Blocking Reason Detection**: Identifies specific reasons preventing PR
+  merges (conflicts, failing checks, blocked reviews)
+- **Copilot Integration**: Counts unresolved GitHub Copilot feedback comments
+- **Smart Filtering**: Excludes standard code review requirements, focuses on
+  technical blocking issues
+- **Detailed Reporting**: Provides comprehensive tables and summaries of
+  problematic PRs
+- **Real-time Progress**: Live progress display shows scanning status and
+  current operations
+
+### Automated Merging
+
+- **Universal PR Support**: Works with any pull request regardless of author
+  or automation tool
 - **Smart Matching**: Uses content similarity algorithms to match related PRs
   across repositories
 - **Bulk Operations**: Approve and merge related similar PRs with a single command
-- **Security Features**: SHA-based authentication for non-automation PRs ensures
-  authorized bulk merges
+- **Security Features**: SHA-based authentication for non-automation PRs
+  ensures authorized bulk merges
 - **Dry Run Mode**: Preview what changes will apply without modifications
+
+### General Features
+
 - **Rich CLI Output**: Beautiful terminal output with progress indicators and tables
+- **Real-time Progress**: Live progress updates for both scanning and merge operations
+- **Output Formats**: Support for table and JSON output formats
+- **Error Handling**: Graceful handling of API rate limits and repository
+  access issues
 
-## Supported Automation Tools
+## Supported Pull Requests
 
-- Dependabot
-- pre-commit.ci
-- Renovate
-- GitHub Actions
-- Allcontributors
+- Any pull request from any author
+- Manual pull requests from developers
+- Automation tool pull requests (Dependabot, Renovate, etc.)
+- Bot-generated pull requests
+- Coordinated changes across repositories
 
 ## Installation
 
@@ -77,94 +100,116 @@ Or pass it directly to the command using `--token`.
 
 ## Usage
 
-### Automation PRs (Original Functionality)
+### Organization Scanning (New Feature)
 
-For pull requests from automation tools like Dependabot, pre-commit.ci, and Renovate:
-
-```bash
-dependamerge https://github.com/lfreleng-actions/python-project-name-action/pull/22
-```
-
-### Non-Automation PRs (New Feature)
-
-For pull requests from regular GitHub users, a two-step process ensures security:
-
-#### Step 1: Get the required SHA
+Scan an entire GitHub organization for unmergeable pull requests:
 
 ```bash
-dependamerge https://github.com/owner/repo/pull/123
-# Output: To merge this and similar PRs, run again with: --override a1b2c3d4e5f6g7h8
+# Basic organization scan
+dependamerge scan myorganization
+
+# Scan with JSON output
+dependamerge scan myorganization --format json
+
+# Hide Copilot comment counts
+dependamerge scan myorganization --hide-copilot
+
+# Disable real-time progress display
+dependamerge scan myorganization --no-progress
 ```
 
-#### Step 2: Use the SHA to proceed
+The scan command will:
+
+- Analyze all repositories in the organization
+- Identify PRs with technical blocking issues
+- Report blocking reasons (merge conflicts, failing workflows, etc.)
+- Count unresolved GitHub Copilot feedback comments
+- Exclude standard code review requirements from blocking reasons
+
+### Basic Pull Request Merging
+
+For any pull request from any author:
 
 ```bash
-dependamerge https://github.com/owner/repo/pull/123 --override a1b2c3d4e5f6g7h8
+dependamerge merge https://github.com/lfreleng-actions/python-project-name-action/pull/22
 ```
 
-The SHA hash generates based on:
+### Optional Security Validation
+
+For extra security, you can use the --override flag with SHA-based validation:
+
+```bash
+dependamerge merge https://github.com/owner/repo/pull/123 \
+  --override a1b2c3d4e5f6g7h8
+```
+
+The SHA hash derives from:
 
 - The PR author's GitHub username
 - The first line of the commit message
-- This ensures PRs from the same author with matching commits can be bulk merged
+- This provides an extra layer of validation for sensitive operations
 
-### Basic Usage
+### Basic Merge Usage
 
 ```bash
-dependamerge https://github.com/lfreleng-actions/python-project-name-action/pull/22
+dependamerge merge \
+  https://github.com/lfreleng-actions/python-project-name-action/pull/22
 ```
 
 ### Dry Run (Preview Mode)
 
 ```bash
-dependamerge https://github.com/owner/repo/pull/123 --dry-run
+dependamerge merge https://github.com/owner/repo/pull/123 --dry-run
 ```
 
-### Custom Options
+### Custom Merge Options
 
 ```bash
-dependamerge https://github.com/owner/repo/pull/123 \
+dependamerge merge https://github.com/owner/repo/pull/123 \
   --threshold 0.9 \
   --merge-method squash \
   --fix \
+  --no-progress \
   --token your_github_token
 ```
 
 ### Command Options
 
+#### Scan Command Options
+
+- `--format TEXT`: Output format - table or json (default: table)
+- `--show-copilot/--hide-copilot`: Show or hide Copilot comment counts
+  (default: show)
+- `--progress/--no-progress`: Show real-time progress updates (default: progress)
+- `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
+
+#### Merge Command Options
+
 - `--dry-run`: Show what changes will apply without making them
-- `--threshold FLOAT`: Similarity threshold for matching PRs (0.0-1.0, default: 0.8)
+- `--threshold FLOAT`: Similarity threshold for matching PRs (0.0-1.0,
+  default: 0.8)
 - `--merge-method TEXT`: Merge method - merge, squash, or rebase (default: merge)
 - `--fix`: Automatically fix out-of-date branches before merging
+- `--progress/--no-progress`: Show real-time progress updates (default: progress)
 - `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
-- `--override TEXT`: SHA hash to override non-automation PR restriction
+- `--override TEXT`: SHA hash for extra security validation
 
 ## How It Works
 
-### For Automation PRs
+### Pull Request Processing
 
 1. **Parse Source PR**: Analyzes the provided pull request URL and extracts metadata
-2. **Validation**: Ensures the PR is from a recognized automation tool
-3. **Organization Scan**: Lists all repositories in the same GitHub organization
-4. **PR Discovery**: Finds all open pull requests in each repository
-5. **Content Matching**: Compares PRs using different similarity metrics:
+2. **Organization Scan**: Lists all repositories in the same GitHub organization
+3. **PR Discovery**: Finds all open pull requests in each repository
+4. **Content Matching**: Compares PRs using different similarity metrics:
    - Title similarity (normalized to remove version numbers)
    - File change patterns
    - Author matching
+5. **Optional Validation**: If `--override` provided, validates SHA for extra security
 6. **Approval & Merge**: For matching PRs above the threshold:
    - Adds an approval review
    - Merges the pull request
 7. **Source PR Merge**: Merges the original source PR that served as the baseline
-
-### For Non-Automation PRs
-
-1. **Parse Source PR**: Analyzes the provided pull request URL and extracts metadata
-2. **Non-Automation Detection**: Identifies that PR is from a regular user
-3. **SHA Generation**: Creates unique SHA based on author + commit message
-4. **Override Validation**: If `--override` provided, validates SHA matches expectations
-5. **Author-Specific Scan**: Finds PRs from the same author
-6. **Content Matching**: Same similarity algorithms as automation PRs
-7. **Approval & Merge**: Merges matching PRs from the same author
 
 ## Similarity Matching
 
@@ -193,46 +238,52 @@ Combines different factors:
 
 ## Examples
 
-### Dependabot PR
+### Example: Organization Scanning
 
 ```bash
-# Merge a Dependabot dependency update across all repos
-dependamerge https://github.com/myorg/repo1/pull/45
+# Scan organization for unmergeable PRs
+dependamerge scan myorganization
+
+# Get detailed JSON output
+dependamerge scan myorganization --format json > unmergeable_prs.json
+
+# Scan without Copilot comment analysis
+dependamerge scan myorganization --hide-copilot
+
+# Scan without progress display
+dependamerge scan myorganization --no-progress
 ```
 
-### pre-commit.ci PR
+### Example: Automated Merging
+
+#### Dependency Update PR
 
 ```bash
-# Merge pre-commit hook updates
-dependamerge https://github.com/myorg/repo1/pull/12 --threshold 0.85
+# Merge a dependency update across all repos
+dependamerge merge https://github.com/myorg/repo1/pull/45
 ```
 
-### Non-Automation User PR
+#### Documentation Update PR
 
 ```bash
-# First run to get the SHA
-dependamerge https://github.com/myorg/repo1/pull/89
-# Output: To merge this and similar PRs, run again with: --override f1a2b3c4d5e6f7g8
-
-# Second run with the override SHA
-dependamerge https://github.com/myorg/repo1/pull/89 --override f1a2b3c4d5e6f7g8
+# Merge documentation updates
+dependamerge merge https://github.com/myorg/repo1/pull/12 --threshold 0.85
 ```
 
-### Dry Run with Fix Option
+#### Feature PR with Security Validation
+
+```bash
+# Merge with optional security validation
+dependamerge merge https://github.com/myorg/repo1/pull/89 \
+  --override f1a2b3c4d5e6f7g8
+```
+
+#### Dry Run with Fix Option
 
 ```bash
 # See what changes will apply and automatically fix out-of-date branches
-dependamerge https://github.com/myorg/repo1/pull/78 --dry-run --fix --threshold 0.9
-```
-
-### Non-Automation PR Example
-
-```bash
-# Step 1: Get the SHA for the non-automation PR
-dependamerge https://github.com/owner/repo/pull/123
-
-# Step 2: Merge using the obtained SHA
-dependamerge https://github.com/owner/repo/pull/123 --override a1b2c3d4e5f6g7h8
+dependamerge merge https://github.com/myorg/repo1/pull/78 \
+  --dry-run --fix --threshold 0.9 --progress
 ```
 
 ## Safety Features
@@ -241,24 +292,22 @@ dependamerge https://github.com/owner/repo/pull/123 --override a1b2c3d4e5f6g7h8
 
 - **Mergeable Check**: Verifies PRs are in a mergeable state before attempting merge
 - **Auto-Fix**: Automatically update out-of-date branches when using `--fix` option
-- **Detailed Status**: Shows specific reasons why PRs cannot merge
-  (conflicts, blocked by checks, etc.)
-- **Similarity Threshold**: Configurable confidence threshold prevents
-  incorrect matches
+- **Detailed Status**: Shows specific reasons preventing PR merges (conflicts,
+  blocked by checks, etc.)
+- **Similarity Threshold**: Configurable confidence threshold prevents incorrect
+  matches
 - **Dry Run Mode**: Always test with `--dry-run` first
 - **Detailed Logging**: Shows which PRs match and why they match
 
-### Security for Automation PRs
+### Security for All PRs
 
-- **Automation-Focused**: Processes PRs from recognized automation tools
-
-### Security for Non-Automation PRs
-
-- **SHA-Based Authentication**: Requires unique SHA hash for each author/commit combination
-- **Author Isolation**: Merges PRs from the same author as source PR
-- **Commit Binding**: SHA changes if commit message changes, preventing replay attacks
-- **No Cross-Author Attacks**: One author's SHA cannot work for another
-  author's PRs
+- **SHA-Based Validation**: Provides unique SHA hash for security
+- **Author Isolation**: When using SHA validation, processes PRs from the same
+  author as source PR
+- **Commit Binding**: SHA changes if commit message changes, preventing replay
+  attacks
+- **Cross-Author Protection**: When enabled, one author's SHA cannot work for
+  another author's PRs
 
 ## Enhanced URL Support
 
@@ -352,8 +401,10 @@ Solution: Ensure your token has `read:org` scope.
 ### Getting Help
 
 - Check the command help: `dependamerge --help`
+- Get specific command help: `dependamerge scan --help` or `dependamerge merge --help`
 - Enable verbose output with environment variables
-- Review the similarity scoring in dry-run mode
+- Review the similarity scoring in dry-run mode for merge operations
+- Use JSON output format for programmatic processing of scan results
 
 ## Security Considerations
 
