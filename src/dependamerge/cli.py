@@ -18,6 +18,7 @@ from .github_client import GitHubClient
 from .models import ComparisonResult, PullRequestInfo, UnmergeablePR
 from .pr_comparator import PRComparator
 from .progress_tracker import ProgressTracker, MergeProgressTracker
+from .resolve_conflicts import FixOrchestrator, FixOptions, PRSelection
 
 # Constants
 MAX_RETRIES = 2
@@ -278,11 +279,16 @@ def merge(
         if progress_tracker:
             progress_tracker.stop()
             summary = progress_tracker.get_summary()
-            console.print(f"\n✅ Analysis completed in {summary['elapsed_time']}")
-            console.print(f"📊 Analyzed {summary['total_prs_analyzed']} PRs across {summary['completed_repositories']} repositories")
-            console.print(f"🔍 Found {summary['similar_prs_found']} similar PRs")
-            if summary['errors_count'] > 0:
-                console.print(f"⚠️  {summary['errors_count']} errors encountered during analysis")
+            elapsed_time = summary.get('elapsed_time')
+            total_prs_analyzed = summary.get('total_prs_analyzed')
+            completed_repositories = summary.get('completed_repositories')
+            similar_prs_found = summary.get('similar_prs_found')
+            errors_count = summary.get('errors_count', 0)
+            console.print(f"\n✅ Analysis completed in {elapsed_time}")
+            console.print(f"📊 Analyzed {total_prs_analyzed} PRs across {completed_repositories} repositories")
+            console.print(f"🔍 Found {similar_prs_found} similar PRs")
+            if errors_count > 0:
+                console.print(f"⚠️  {errors_count} errors encountered during analysis")
             console.print()
 
         if not all_similar_prs:
@@ -354,7 +360,9 @@ def merge(
 
         if progress_tracker:
             final_summary = progress_tracker.get_summary()
-            console.print(f"📈 Final Results: {final_summary['prs_merged']} merged, {final_summary['merge_failures']} failed")
+            prs_merged = final_summary.get('prs_merged', 0)
+            merge_failures = final_summary.get('merge_failures', 0)
+            console.print(f"📈 Final Results: {prs_merged} merged, {merge_failures} failed")
 
     except Exception as e:
         # Ensure progress tracker is stopped even if merge fails
@@ -511,7 +519,33 @@ def blocked(
     output_format: str = typer.Option(
         "table", "--format", help="Output format: table, json"
     ),
-
+    fix: bool = typer.Option(
+        False, "--fix", help="Interactively rebase to resolve conflicts and force-push updates"
+    ),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", help="Maximum number of PRs to attempt fixing"
+    ),
+    reason: Optional[str] = typer.Option(
+        None, "--reason", help="Only fix PRs with this blocking reason (e.g., merge_conflict, behind_base)"
+    ),
+    workdir: Optional[str] = typer.Option(
+        None, "--workdir", help="Base directory for workspaces (defaults to a secure temp dir)"
+    ),
+    keep_temp: bool = typer.Option(
+        False, "--keep-temp", help="Keep the temporary workspace for inspection after completion"
+    ),
+    prefetch: int = typer.Option(
+        6, "--prefetch", help="Number of repositories to prepare in parallel"
+    ),
+    editor: Optional[str] = typer.Option(
+        None, "--editor", help="Editor command to use for resolving conflicts (defaults to $VISUAL or $EDITOR)"
+    ),
+    mergetool: bool = typer.Option(
+        False, "--mergetool", help="Use 'git mergetool' for resolving conflicts when available"
+    ),
+    interactive: bool = typer.Option(
+        True, "--interactive/--no-interactive", help="Attach rebase to the terminal for interactive resolution"
+    ),
     show_progress: bool = typer.Option(
         True, "--progress/--no-progress", help="Show real-time progress updates"
     ),
@@ -564,14 +598,61 @@ def blocked(
 
             # Show scan summary
             summary = progress_tracker.get_summary()
-            console.print(f"✅ Check completed in {summary['elapsed_time']}")
-            console.print(f"📊 Analyzed {summary['total_prs_analyzed']} PRs across {summary['completed_repositories']} repositories")
-            if summary['errors_count'] > 0:
-                console.print(f"⚠️  {summary['errors_count']} errors encountered during check")
+            elapsed_time = summary.get('elapsed_time')
+            total_prs_analyzed = summary.get('total_prs_analyzed')
+            completed_repositories = summary.get('completed_repositories')
+            errors_count = summary.get('errors_count', 0)
+            console.print(f"✅ Check completed in {elapsed_time}")
+            console.print(f"📊 Analyzed {total_prs_analyzed} PRs across {completed_repositories} repositories")
+            if errors_count > 0:
+                console.print(f"⚠️  {errors_count} errors encountered during check")
             console.print()  # Add blank line before results
 
         # Display results
         _display_blocked_results(scan_result, output_format)
+
+        # Optional fix workflow
+        if fix:
+            # Build candidate list based on reasons
+            allowed_default = {"merge_conflict", "behind_base"}
+            reasons_to_attempt = allowed_default if not reason else {reason.strip().lower()}
+
+            selections: List[PRSelection] = []
+            for pr in scan_result.unmergeable_prs:
+                pr_reason_types = {r.type for r in pr.reasons}
+                if pr_reason_types & reasons_to_attempt:
+                    selections.append(PRSelection(repository=pr.repository, pr_number=pr.pr_number))
+
+            if limit is not None and limit > 0:
+                selections = selections[:limit]
+
+            if not selections:
+                console.print("No eligible PRs to fix based on the selected reasons.")
+                return
+
+            token_to_use = token or os.getenv("GITHUB_TOKEN")
+            if not token_to_use:
+                console.print("A GitHub token is required for --fix. Provide --token or set GITHUB_TOKEN.")
+                raise typer.Exit(1)
+
+            console.print(f"Starting interactive fix for {len(selections)} PR(s)...")
+            try:
+                orchestrator = FixOrchestrator(token_to_use, progress_tracker=progress_tracker, logger=lambda m: console.print(m))
+                fix_options = FixOptions(
+                    workdir=workdir,
+                    keep_temp=keep_temp,
+                    prefetch=prefetch,
+                    editor=editor,
+                    mergetool=mergetool,
+                    interactive=interactive,
+                    logger=lambda m: console.print(m),
+                )
+                results = orchestrator.run(selections, fix_options)
+                success_count = sum(1 for r in results if r.success)
+                console.print(f"✅ Fix complete: {success_count}/{len(selections)} succeeded")
+            except Exception as e:
+                console.print(f"Error during fix workflow: {e}")
+                raise typer.Exit(1)
 
     except Exception as e:
         # Ensure progress tracker is stopped even if check fails
