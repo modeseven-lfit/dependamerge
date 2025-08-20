@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import requests
 import typer
 import urllib3.exceptions
-from github.Repository import Repository
+
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
@@ -85,7 +85,7 @@ def merge(
             raise typer.Exit(1)
 
         # Get organization repositories
-        console.print(f"\nScanning organization: {owner}")
+        console.print(f"\nChecking organization: {owner}")
 
         with Progress(
             SpinnerColumn(),
@@ -94,7 +94,7 @@ def merge(
         ) as progress:
             task = progress.add_task("Fetching repositories...", total=None)
             try:
-                repositories: List[Repository] = (
+                repositories: List[Any] = (
                     github_client.get_organization_repositories(owner)
                 )
             except (

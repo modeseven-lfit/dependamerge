@@ -3,7 +3,7 @@
 
 import re
 from difflib import SequenceMatcher
-from typing import List
+from typing import List, Optional
 
 from .models import ComparisonResult, PullRequestInfo
 
@@ -37,6 +37,12 @@ class PRComparator:
         scores.append(title_score)
         if title_score > 0.7:
             reasons.append(f"Similar titles (score: {title_score:.2f})")
+
+        # Compare PR bodies for additional context
+        body_score = self._compare_bodies(source_pr.body, target_pr.body)
+        scores.append(body_score)
+        if body_score > 0.6:
+            reasons.append(f"Similar PR descriptions (score: {body_score:.2f})")
 
         # Compare file changes
         files_score = self._compare_file_changes(
@@ -154,5 +160,165 @@ class PRComparator:
                 # Remove common prefixes that might vary
                 package = re.sub(r'^["\']|["\']$', '', package)  # Remove quotes
                 return package
+
+        return ""
+
+    def _compare_bodies(self, body1: Optional[str], body2: Optional[str]) -> float:
+        """Compare PR bodies for similarity in automation patterns."""
+        if not body1 or not body2:
+            return 0.0
+
+        # Normalize both bodies
+        normalized1 = self._normalize_body(body1)
+        normalized2 = self._normalize_body(body2)
+
+        # For very short bodies, use exact matching
+        if len(normalized1) < 50 or len(normalized2) < 50:
+            return 1.0 if normalized1 == normalized2 else 0.0
+
+        # Check for specific automation patterns
+        automation_score = self._compare_automation_patterns(body1, body2)
+        if automation_score > 0:
+            return automation_score
+
+        # Fall back to sequence matching for general similarity
+        return SequenceMatcher(None, normalized1, normalized2).ratio()
+
+    def _normalize_body(self, body: Optional[str]) -> str:
+        """Normalize PR body by removing version-specific and variable content."""
+        if not body:
+            return ""
+
+        # Convert to lowercase
+        body = body.lower()
+
+        # Remove URLs (they often contain version-specific paths)
+        body = re.sub(r'https?://[^\s]+', '', body)
+
+        # Remove version numbers
+        body = re.sub(r'v?\d+\.\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.-]+)?', 'VERSION', body)
+
+        # Remove commit hashes
+        body = re.sub(r'\b[a-f0-9]{7,40}\b', 'COMMIT', body)
+
+        # Remove dates
+        body = re.sub(r'\d{4}-\d{2}-\d{2}', 'DATE', body)
+
+        # Remove specific numbers that might be build/PR numbers
+        body = re.sub(r'#\d+', '#NUMBER', body)
+
+        # Normalize whitespace
+        body = re.sub(r'\s+', ' ', body).strip()
+
+        return body
+
+    def _compare_automation_patterns(self, body1: Optional[str], body2: Optional[str]) -> float:
+        """Compare bodies for specific automation tool patterns."""
+
+        if not body1 or not body2:
+            return 0.0
+
+        # Dependabot patterns
+        if self._is_dependabot_body(body1) and self._is_dependabot_body(body2):
+            # Extract package information from both bodies
+            package1 = self._extract_dependabot_package(body1)
+            package2 = self._extract_dependabot_package(body2)
+
+            if package1 and package2 and package1 == package2:
+                return 0.95  # Very high confidence for same package updates
+            elif package1 and package2:
+                return 0.1   # Different packages, low similarity
+
+        # Pre-commit patterns
+        if self._is_precommit_body(body1) and self._is_precommit_body(body2):
+            return 0.9  # Pre-commit updates are usually similar
+
+        # GitHub Actions patterns
+        if self._is_github_actions_body(body1) and self._is_github_actions_body(body2):
+            action1 = self._extract_github_action(body1)
+            action2 = self._extract_github_action(body2)
+
+            if action1 and action2 and action1 == action2:
+                return 0.9
+            elif action1 and action2:
+                return 0.2
+
+        return 0.0
+
+    def _is_dependabot_body(self, body: Optional[str]) -> bool:
+        """Check if body contains Dependabot-specific patterns."""
+        if not body:
+            return False
+
+        dependabot_patterns = [
+            "dependabot",
+            "bumps",
+            "from .* to",
+            "release notes",
+            "changelog",
+            "commits",
+            "dependency-name:"
+        ]
+
+        body_lower = body.lower()
+        return sum(1 for pattern in dependabot_patterns if pattern in body_lower) >= 2
+
+    def _extract_dependabot_package(self, body: Optional[str]) -> str:
+        """Extract package name from Dependabot PR body."""
+        if not body:
+            return ""
+
+        # Look for "dependency-name: package" pattern in YAML frontmatter
+        yaml_match = re.search(r'dependency-name:\s*([^\s\n]+)', body, re.IGNORECASE)
+        if yaml_match:
+            return yaml_match.group(1).strip()
+
+        # Look for "Bumps [package]" pattern
+        bump_match = re.search(r'bumps\s+\[([^\]]+)\]', body, re.IGNORECASE)
+        if bump_match:
+            return bump_match.group(1).strip()
+
+        return ""
+
+    def _is_precommit_body(self, body: Optional[str]) -> bool:
+        """Check if body contains pre-commit specific patterns."""
+        if not body:
+            return False
+
+        precommit_patterns = [
+            "pre-commit",
+            "autoupdate",
+            "hooks",
+            ".pre-commit-config.yaml"
+        ]
+
+        body_lower = body.lower()
+        return any(pattern in body_lower for pattern in precommit_patterns)
+
+    def _is_github_actions_body(self, body: Optional[str]) -> bool:
+        """Check if body contains GitHub Actions specific patterns."""
+        if not body:
+            return False
+
+        actions_patterns = [
+            "github actions",
+            "workflow",
+            "action",
+            ".github/workflows",
+            "uses:"
+        ]
+
+        body_lower = body.lower()
+        return any(pattern in body_lower for pattern in actions_patterns)
+
+    def _extract_github_action(self, body: Optional[str]) -> str:
+        """Extract action name from GitHub Actions PR body."""
+        if not body:
+            return ""
+
+        # Look for "uses: action/name@version" pattern
+        uses_match = re.search(r'uses:\s*([^@\s]+)', body, re.IGNORECASE)
+        if uses_match:
+            return uses_match.group(1).strip()
 
         return ""

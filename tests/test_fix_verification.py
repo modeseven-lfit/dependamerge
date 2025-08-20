@@ -16,13 +16,18 @@ def test_final_verification():
     """Final test to demonstrate the fix is working"""
     with patch("dependamerge.cli.GitHubClient") as mock_client_class, patch(
         "dependamerge.cli.PRComparator"
-    ) as mock_comparator_class:
+    ) as mock_comparator_class, patch(
+        "dependamerge.github_service.GitHubService"
+    ) as mock_service_class:
         # Setup mocks
         mock_client = Mock()
         mock_client_class.return_value = mock_client
 
         mock_comparator = Mock()
         mock_comparator_class.return_value = mock_comparator
+
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
 
         mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
         mock_client.is_automation_author.return_value = True
@@ -61,6 +66,16 @@ def test_final_verification():
         mock_client.approve_pull_request.return_value = True
         mock_client.merge_pull_request.return_value = True
         mock_client.fix_out_of_date_pr.return_value = True
+
+        # Mock the GitHubService.find_similar_prs method as async to return no similar PRs
+        async def mock_find_similar_prs(*args, **kwargs):
+            return []
+
+        async def mock_close():
+            return None
+
+        mock_service.find_similar_prs = mock_find_similar_prs
+        mock_service.close = mock_close
 
         # Run the CLI command
         merge(
