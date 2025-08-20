@@ -427,7 +427,7 @@ class GitHubService:
         return PullRequestInfo(
             number=int(pr.get("number", 0)),
             title=pr.get("title") or "",
-            body=(pr.get("bodyText") or None),
+            body=(pr.get("body") or None),
             author=((pr.get("author") or {}).get("login") or "unknown"),
             head_sha=pr.get("headRefOid") or "",
             base_branch=pr.get("baseRefName") or "",
@@ -527,7 +527,7 @@ class GitHubService:
                 if self._progress:
                     self._progress.analyze_pr(target_pr.number, repo_full_name)
 
-                comparison: ComparisonResult = comparator.compare_pull_requests(source_pr, target_pr)
+                comparison: ComparisonResult = comparator.compare_pull_requests(source_pr, target_pr, only_automation)
                 if comparison.is_similar:
                     matching_prs_in_repo.append((target_pr, comparison))
                     if self._progress:

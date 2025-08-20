@@ -374,3 +374,76 @@ class TestPRComparator:
         for title, expected_package in test_cases:
             actual_package = comparator._extract_package_name(title)
             assert actual_package == expected_package, f"Failed for title: {title}"
+
+    def test_compare_non_automation_prs(self):
+        """Test that non-automation PRs can be compared when only_automation=False."""
+        comparator = PRComparator(0.7)
+
+        # Non-automation PR 1 with similar workflow update
+        pr1 = PullRequestInfo(
+            number=9,
+            title="CI: Update tag-push.yaml workflow",
+            body="Updates the tag-push workflow configuration",
+            author="ModeSevenIndustrialSolutions",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="fix-workflow",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[
+                FileChange(
+                    filename=".github/workflows/tag-push.yaml",
+                    additions=5,
+                    deletions=2,
+                    changes=7,
+                    status="modified",
+                )
+            ],
+            repository_full_name="org/repo1",
+            html_url="https://github.com/org/repo1/pull/9",
+        )
+
+        # Non-automation PR 2 with similar workflow update from same author
+        pr2 = PullRequestInfo(
+            number=15,
+            title="CI: Update tag-push.yaml workflow configuration",
+            body="Updates the tag-push workflow for better performance",
+            author="ModeSevenIndustrialSolutions",
+            head_sha="def456",
+            base_branch="main",
+            head_branch="update-workflow",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[
+                FileChange(
+                    filename=".github/workflows/tag-push.yaml",
+                    additions=3,
+                    deletions=1,
+                    changes=4,
+                    status="modified",
+                )
+            ],
+            repository_full_name="org/repo2",
+            html_url="https://github.com/org/repo2/pull/15",
+        )
+
+        # Test with only_automation=False (non-automation mode)
+        result = comparator.compare_pull_requests(pr1, pr2, only_automation=False)
+        assert result.is_similar
+        assert result.confidence_score >= 0.7
+        assert any("Similar titles" in reason for reason in result.reasons)
+        assert any("Similar file changes" in reason for reason in result.reasons)
+
+        # Test with only_automation=True (should fail for non-automation PRs)
+        result_automation = comparator.compare_pull_requests(
+            pr1, pr2, only_automation=True
+        )
+        assert not result_automation.is_similar
+        assert result_automation.confidence_score == 0.0
+        assert (
+            "One or both PRs are not from automation tools" in result_automation.reasons
+        )
