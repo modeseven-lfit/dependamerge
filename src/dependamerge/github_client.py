@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 import os
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 import requests
 import urllib3.exceptions
@@ -11,7 +12,17 @@ from github.CommitStatus import CommitStatus
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
-from .models import FileChange, PullRequestInfo
+from .models import (
+    CopilotComment,
+    FileChange,
+    OrganizationScanResult,
+    PullRequestInfo,
+    UnmergeablePR,
+    UnmergeableReason,
+)
+
+if TYPE_CHECKING:
+    from .progress_tracker import ProgressTracker
 
 
 class GitHubClient:
@@ -357,3 +368,329 @@ class GitHubClient:
         except GithubException as e:
             print(f"Failed to update PR {pr_number}: {e}")
             return False
+
+    def scan_organization_for_unmergeable_prs(
+        self, org_name: str, progress_tracker: Optional["ProgressTracker"] = None
+    ) -> OrganizationScanResult:
+        """Scan an entire GitHub organization for unmergeable pull requests.
+
+        Args:
+            org_name: Name of the GitHub organization to scan
+            progress_tracker: Optional progress tracker for real-time updates
+        """
+        scan_timestamp = datetime.now().isoformat()
+        errors = []
+        unmergeable_prs = []
+        total_prs = 0
+        scanned_repositories = 0
+
+        try:
+            if progress_tracker:
+                progress_tracker.update_operation("Getting organization details...")
+            org = self.github.get_organization(org_name)
+
+            if progress_tracker:
+                progress_tracker.update_operation("Listing repositories...")
+            repositories = list(org.get_repos())
+            total_repositories = len(repositories)
+
+            if progress_tracker:
+                progress_tracker.update_total_repositories(total_repositories)
+
+            for repo in repositories:
+                try:
+                    if progress_tracker:
+                        progress_tracker.start_repository(repo.full_name)
+
+                    scanned_repositories += 1
+                    repo_unmergeable_prs = self._scan_repository_for_unmergeable_prs(
+                        repo, progress_tracker
+                    )
+                    unmergeable_prs.extend(repo_unmergeable_prs)
+
+                    # Count all open PRs in this repository
+                    if progress_tracker:
+                        progress_tracker.update_operation(f"Counting PRs in {repo.full_name}")
+                    repo_prs = list(repo.get_pulls(state='open'))
+                    total_prs += len(repo_prs)
+
+                    if progress_tracker:
+                        progress_tracker.complete_repository(len(repo_unmergeable_prs))
+
+                except Exception as e:
+                    if progress_tracker:
+                        progress_tracker.add_error()
+                    errors.append(f"Error scanning repository {repo.full_name}: {str(e)}")
+                    continue
+
+        except Exception as e:
+            errors.append(f"Error accessing organization {org_name}: {str(e)}")
+            total_repositories = 0
+
+        return OrganizationScanResult(
+            organization=org_name,
+            total_repositories=total_repositories,
+            scanned_repositories=scanned_repositories,
+            total_prs=total_prs,
+            unmergeable_prs=unmergeable_prs,
+            scan_timestamp=scan_timestamp,
+            errors=errors
+        )
+
+    def _scan_repository_for_unmergeable_prs(
+        self, repo: Repository, progress_tracker: Optional["ProgressTracker"] = None
+    ) -> List[UnmergeablePR]:
+        """Scan a single repository for unmergeable pull requests.
+
+        Args:
+            repo: GitHub repository to scan
+            progress_tracker: Optional progress tracker for real-time updates
+        """
+        unmergeable_prs = []
+
+        try:
+            # Get all open pull requests
+            prs = repo.get_pulls(state='open')
+
+            for pr in prs:
+                try:
+                    if progress_tracker:
+                        progress_tracker.analyze_pr(pr.number, repo.full_name)
+
+                    # Skip PRs with incomplete data
+                    if not pr.user or not pr.title or not pr.html_url:
+                        if progress_tracker:
+                            progress_tracker.add_error()
+                            progress_tracker.update_operation(f"Skipping incomplete PR #{pr.number} in {repo.full_name}")
+                        continue
+
+                    # Check if PR is unmergeable
+                    unmergeable_reasons = self._analyze_pr_mergeability(pr)
+
+                    if unmergeable_reasons:
+                        if progress_tracker:
+                            progress_tracker.update_operation(
+                                f"Getting Copilot comments for PR #{pr.number}"
+                            )
+                        # Get Copilot comments count
+                        copilot_comments = self._get_copilot_comments(pr)
+
+                        # Safe date handling
+                        created_at = pr.created_at.isoformat() if pr.created_at else datetime.now().isoformat()
+                        updated_at = pr.updated_at.isoformat() if pr.updated_at else datetime.now().isoformat()
+
+                        unmergeable_pr = UnmergeablePR(
+                            repository=repo.full_name,
+                            pr_number=pr.number,
+                            title=pr.title,
+                            author=pr.user.login,
+                            url=pr.html_url,
+                            reasons=unmergeable_reasons,
+                            copilot_comments_count=len(copilot_comments),
+                            copilot_comments=copilot_comments,
+                            created_at=created_at,
+                            updated_at=updated_at
+                        )
+
+                        unmergeable_prs.append(unmergeable_pr)
+
+                except Exception:
+                    if progress_tracker:
+                        progress_tracker.add_error()
+                        progress_tracker.update_operation(f"Error analyzing PR #{pr.number} in {repo.full_name} - continuing...")
+                    # Silently handle errors to avoid spamming the console
+                    continue
+
+        except Exception:
+            # Silently handle repository-level errors
+            if progress_tracker:
+                progress_tracker.add_error()
+                progress_tracker.update_operation(f"Error accessing repository {repo.full_name} - skipping...")
+
+        return unmergeable_prs
+
+    def _analyze_pr_mergeability(self, pr: PullRequest) -> List[UnmergeableReason]:
+        """Analyze a PR to determine why it cannot be merged."""
+        reasons = []
+
+        # Check if PR is draft
+        if pr.draft:
+            reasons.append(UnmergeableReason(
+                type="draft",
+                description="Pull request is in draft state"
+            ))
+
+        # Check mergeable state
+        if pr.mergeable is False:
+            if pr.mergeable_state == "dirty":
+                reasons.append(UnmergeableReason(
+                    type="merge_conflict",
+                    description="Pull request has merge conflicts",
+                    details="Branch cannot be automatically merged due to conflicts"
+                ))
+            elif pr.mergeable_state == "behind":
+                reasons.append(UnmergeableReason(
+                    type="behind_base",
+                    description="Pull request is behind the base branch",
+                    details="Branch needs to be updated with latest changes"
+                ))
+
+        # Check for failing status checks
+        failing_checks = self._get_failing_status_checks(pr)
+        if failing_checks:
+            reasons.append(UnmergeableReason(
+                type="failing_checks",
+                description="Required status checks are failing",
+                details=f"Failing checks: {', '.join(failing_checks)}"
+            ))
+
+        # Check for blocking reviews
+        if self._has_blocking_reviews(pr):
+            reasons.append(UnmergeableReason(
+                type="blocked_review",
+                description="Pull request has blocking reviews",
+                details="One or more reviewers have requested changes"
+            ))
+
+        # Filter out standard code review requirements (approved reviews)
+        # We only consider it unmergeable if there are actual blocking issues
+        filtered_reasons = [r for r in reasons if r.type != "needs_approval"]
+
+        return filtered_reasons
+
+    def _get_failing_status_checks(self, pr: PullRequest) -> List[str]:
+        """Get list of failing status check names for a PR."""
+        failing_checks: List[str] = []
+
+        try:
+            # Check if head repo exists (can be None for deleted forks)
+            if not pr.head.repo:
+                return failing_checks
+
+            # Check if head.sha exists
+            if not pr.head or not pr.head.sha:
+                return failing_checks
+
+            commit = pr.head.repo.get_commit(pr.head.sha)
+
+            # Get commit statuses (legacy status API)
+            latest_statuses: Dict[str, CommitStatus] = {}
+            for status in commit.get_statuses():
+                context = status.context
+                if (
+                    context not in latest_statuses
+                    or status.updated_at > latest_statuses[context].updated_at
+                ):
+                    latest_statuses[context] = status
+                # Limit to avoid performance issues
+                if len(latest_statuses) >= 50:
+                    break
+
+            # Add failing statuses
+            for status in latest_statuses.values():
+                if status.state in ["failure", "error"] and self._is_blocking_failure(status.context):
+                    failing_checks.append(status.context)
+
+            # Get check runs (GitHub Actions, etc.)
+            try:
+                check_runs = list(commit.get_check_runs()[:50])
+                for check in check_runs:
+                    if check.conclusion in ["failure", "cancelled", "timed_out"] and self._is_blocking_failure(check.name):
+                        failing_checks.append(check.name)
+            except Exception:
+                # Some repos may not have check runs available
+                pass
+
+        except Exception as e:
+            # Silently handle errors to avoid spamming the console
+            # Most common errors are permission issues or deleted forks
+            pass
+
+        return failing_checks
+
+    def _is_blocking_failure(self, check_name: str) -> bool:
+        """Determine if a failing check should block merging."""
+        # Skip non-blocking checks
+        non_blocking_patterns = [
+            "codecov",
+            "sonarcloud",
+            "license/cla",
+            "continuous-integration/travis-ci/push",  # Only PR checks are blocking
+        ]
+
+        check_name_lower = check_name.lower()
+        for pattern in non_blocking_patterns:
+            if pattern in check_name_lower:
+                return False
+
+        return True
+
+    def _has_blocking_reviews(self, pr: PullRequest) -> bool:
+        """Check if PR has blocking review requests."""
+        try:
+            reviews = list(pr.get_reviews())
+
+            # Check for "changes requested" reviews that haven't been dismissed
+            for review in reviews:
+                if review.state == "CHANGES_REQUESTED":
+                    return True
+
+        except Exception:
+            # Silently handle errors to avoid spamming the console
+            pass
+
+        return False
+
+    def _get_copilot_comments(self, pr: PullRequest) -> List[CopilotComment]:
+        """Get unresolved Copilot feedback comments for a PR."""
+        copilot_comments = []
+
+        try:
+            # Get review comments
+            for comment in pr.get_review_comments():
+                if self._is_copilot_comment(comment):
+                    copilot_comments.append(CopilotComment(
+                        id=comment.id,
+                        body=comment.body,
+                        file_path=comment.path,
+                        line_number=comment.line,
+                        created_at=comment.created_at.isoformat(),
+                        state="open"  # Review comments don't have state
+                    ))
+
+            # Get issue comments
+            for comment in pr.get_issue_comments():
+                if self._is_copilot_comment(comment):
+                    copilot_comments.append(CopilotComment(
+                        id=comment.id,
+                        body=comment.body,
+                        created_at=comment.created_at.isoformat(),
+                        state="open"
+                    ))
+
+        except Exception:
+            # Silently handle errors to avoid spamming the console
+            pass
+
+        return copilot_comments
+
+    def _is_copilot_comment(self, comment) -> bool:
+        """Check if a comment is from GitHub Copilot."""
+        # Check if comment is from Copilot user
+        if hasattr(comment, 'user') and comment.user:
+            copilot_users = ["github-copilot[bot]", "copilot"]
+            if comment.user.login in copilot_users:
+                return True
+
+        # Check comment content for Copilot patterns
+        if hasattr(comment, 'body') and comment.body:
+            copilot_patterns = [
+                "github copilot",
+                "copilot suggestion",
+                "ai suggestion",
+                "🤖",  # Robot emoji often used by Copilot
+            ]
+            body_lower = comment.body.lower()
+            return any(pattern in body_lower for pattern in copilot_patterns)
+
+        return False

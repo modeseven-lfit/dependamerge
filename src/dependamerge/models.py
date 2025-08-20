@@ -41,3 +41,49 @@ class ComparisonResult(BaseModel):
     is_similar: bool
     confidence_score: float
     reasons: List[str]
+
+
+class UnmergeableReason(BaseModel):
+    """Represents a reason why a PR cannot be merged."""
+
+    type: str  # e.g., "merge_conflict", "failing_checks", "blocked_review"
+    description: str
+    details: Optional[str] = None
+
+
+class CopilotComment(BaseModel):
+    """Represents an unresolved Copilot feedback comment."""
+
+    id: int
+    body: str
+    file_path: Optional[str] = None
+    line_number: Optional[int] = None
+    created_at: str
+    state: str  # "open", "resolved", etc.
+
+
+class UnmergeablePR(BaseModel):
+    """Represents a pull request that cannot be merged."""
+
+    repository: str
+    pr_number: int
+    title: str
+    author: str
+    url: str
+    reasons: List[UnmergeableReason]
+    copilot_comments_count: int = 0
+    copilot_comments: List[CopilotComment] = []
+    created_at: str
+    updated_at: str
+
+
+class OrganizationScanResult(BaseModel):
+    """Result of scanning an organization for unmergeable PRs."""
+
+    organization: str
+    total_repositories: int
+    scanned_repositories: int
+    total_prs: int
+    unmergeable_prs: List[UnmergeablePR]
+    scan_timestamp: str
+    errors: List[str] = []
