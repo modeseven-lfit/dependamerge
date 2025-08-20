@@ -34,6 +34,15 @@ class PullRequestInfo(BaseModel):
     repository_full_name: str
     html_url: str
 
+    # Optional fields used by the interactive fix workflow
+    # These enable cloning the correct repositories and pushing fixes.
+    head_repo_full_name: Optional[str] = None
+    head_repo_clone_url: Optional[str] = None
+    base_repo_full_name: Optional[str] = None
+    base_repo_clone_url: Optional[str] = None
+    is_fork: Optional[bool] = None
+    maintainer_can_modify: Optional[bool] = None
+
 
 class ComparisonResult(BaseModel):
     """Result of comparing two pull requests."""
