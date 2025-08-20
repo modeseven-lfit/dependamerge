@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dependamerge"
 dynamic = ["version"]
-description = "Scan GitHub organizations for unmergeable PRs and automatically merge similar pull requests"
+description = "Bulk pull request management tool for GitHub organisations"
 authors = [
     {name = "Matthew Watkins", email = "93649628+ModeSevenIndustrialSolutions@users.noreply.github.com" }
 ]
@@ -33,9 +33,12 @@ classifiers = [
 dependencies = [
     "typer>=0.9.0",
     "requests>=2.31.0",
-    "PyGithub>=1.59.0",
+
     "rich>=13.0.0",
     "pydantic>=2.0.0",
+    "httpx>=0.27.0",
+    "tenacity>=8.2.0",
+    "aiolimiter>=1.1.0",
 ]
 
 [project.urls]
@@ -57,6 +60,8 @@ dev = [
     "mypy>=1.0.0",
     "types-requests>=2.31.0",
 ]
+
+
 
 [project.scripts]
 dependamerge = "dependamerge.cli:app"

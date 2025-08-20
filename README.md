@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # Dependamerge
 
-Scan GitHub organizations for unmergeable pull requests and automatically merge
+Find blocked pull requests in GitHub organizations and automatically merge
 similar pull requests across GitHub organizations, supporting both automation
 tools (like Dependabot, pre-commit.ci, Renovate) and regular GitHub users.
 
@@ -13,7 +13,7 @@ tools (like Dependabot, pre-commit.ci, Renovate) and regular GitHub users.
 
 Dependamerge provides two main functions:
 
-1. **Organization Scanning**: Scan entire GitHub organizations to identify
+1. **Finding Blocked PRs**: Check entire GitHub organizations to identify
    pull requests with conflicts, failing checks, or other blocking issues
 2. **Automated Merging**: Analyze a source pull request and find similar pull
    requests across all repositories in the same GitHub organization, then
@@ -27,18 +27,19 @@ unmergeable PRs that need attention.
 
 ## Features
 
-### Organization Scanning
+### Finding Blocked PRs
 
-- **Comprehensive PR Analysis**: Scans all repositories in a GitHub
+- **Comprehensive PR Analysis**: Checks all repositories in a GitHub
   organization for unmergeable pull requests
 - **Blocking Reason Detection**: Identifies specific reasons preventing PR
   merges (conflicts, failing checks, blocked reviews)
 - **Copilot Integration**: Counts unresolved GitHub Copilot feedback comments
+  (column shown when present)
 - **Smart Filtering**: Excludes standard code review requirements, focuses on
   technical blocking issues
 - **Detailed Reporting**: Provides comprehensive tables and summaries of
   problematic PRs
-- **Real-time Progress**: Live progress display shows scanning status and
+- **Real-time Progress**: Live progress display shows checking status and
   current operations
 
 ### Automated Merging
@@ -55,7 +56,7 @@ unmergeable PRs that need attention.
 ### General Features
 
 - **Rich CLI Output**: Beautiful terminal output with progress indicators and tables
-- **Real-time Progress**: Live progress updates for both scanning and merge operations
+- **Real-time Progress**: Live progress updates for both checking and merge operations
 - **Output Formats**: Support for table and JSON output formats
 - **Error Handling**: Graceful handling of API rate limits and repository
   access issues
@@ -100,30 +101,27 @@ Or pass it directly to the command using `--token`.
 
 ## Usage
 
-### Organization Scanning (New Feature)
+### Finding Blocked PRs (New Feature)
 
-Scan an entire GitHub organization for unmergeable pull requests:
+Find blocked pull requests in an entire GitHub organization:
 
 ```bash
-# Basic organization scan
-dependamerge scan myorganization
+# Basic organization check for blocked PRs
+dependamerge blocked myorganization
 
-# Scan with JSON output
-dependamerge scan myorganization --format json
-
-# Hide Copilot comment counts
-dependamerge scan myorganization --hide-copilot
+# Check with JSON output
+dependamerge blocked myorganization --format json
 
 # Disable real-time progress display
-dependamerge scan myorganization --no-progress
+dependamerge blocked myorganization --no-progress
 ```
 
-The scan command will:
+The blocked command will:
 
 - Analyze all repositories in the organization
 - Identify PRs with technical blocking issues
 - Report blocking reasons (merge conflicts, failing workflows, etc.)
-- Count unresolved GitHub Copilot feedback comments
+- Count unresolved GitHub Copilot feedback comments (displayed when present)
 - Exclude standard code review requirements from blocking reasons
 
 ### Basic Pull Request Merging
@@ -175,11 +173,10 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 
 ### Command Options
 
-#### Scan Command Options
+#### Blocked Command Options
 
 - `--format TEXT`: Output format - table or json (default: table)
-- `--show-copilot/--hide-copilot`: Show or hide Copilot comment counts
-  (default: show)
+
 - `--progress/--no-progress`: Show real-time progress updates (default: progress)
 - `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
 
@@ -199,7 +196,7 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 ### Pull Request Processing
 
 1. **Parse Source PR**: Analyzes the provided pull request URL and extracts metadata
-2. **Organization Scan**: Lists all repositories in the same GitHub organization
+2. **Organization Check**: Lists all repositories in the same GitHub organization
 3. **PR Discovery**: Finds all open pull requests in each repository
 4. **Content Matching**: Compares PRs using different similarity metrics:
    - Title similarity (normalized to remove version numbers)
@@ -238,20 +235,17 @@ Combines different factors:
 
 ## Examples
 
-### Example: Organization Scanning
+### Example: Finding Blocked PRs
 
 ```bash
-# Scan organization for unmergeable PRs
-dependamerge scan myorganization
+# Check organization for blocked PRs
+dependamerge blocked myorganization
 
 # Get detailed JSON output
-dependamerge scan myorganization --format json > unmergeable_prs.json
+dependamerge blocked myorganization --format json > unmergeable_prs.json
 
-# Scan without Copilot comment analysis
-dependamerge scan myorganization --hide-copilot
-
-# Scan without progress display
-dependamerge scan myorganization --no-progress
+# Check without progress display
+dependamerge blocked myorganization --no-progress
 ```
 
 ### Example: Automated Merging
@@ -401,10 +395,11 @@ Solution: Ensure your token has `read:org` scope.
 ### Getting Help
 
 - Check the command help: `dependamerge --help`
-- Get specific command help: `dependamerge scan --help` or `dependamerge merge --help`
+- Get specific command help:
+    `dependamerge blocked --help` or `dependamerge merge --help`
 - Enable verbose output with environment variables
 - Review the similarity scoring in dry-run mode for merge operations
-- Use JSON output format for programmatic processing of scan results
+- Use JSON output format for programmatic processing of blocked PR results
 
 ## Security Considerations
 

@@ -74,38 +74,46 @@ class TestGitHubClient:
         assert repo == "repository"
         assert pr_number == 789
 
-    @patch("dependamerge.github_client.Github")
-    def test_get_pull_request_info(self, mock_github_class):
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_get_pull_request_info(self, mock_async_class):
         # Setup mocks
-        mock_github = Mock()
-        mock_github_class.return_value = mock_github
+        mock_async = Mock()
+        mock_async_class.return_value.__aenter__.return_value = mock_async
 
-        mock_repo = Mock()
-        mock_github.get_repo.return_value = mock_repo
-        mock_repo.full_name = "owner/repo"
+        # Mock PR data
+        pr_data = {
+            "number": 22,
+            "title": "Test PR",
+            "body": "Test body",
+            "user": {"login": "dependabot[bot]"},
+            "head": {"sha": "abc123", "ref": "update-deps"},
+            "base": {"ref": "main"},
+            "state": "open",
+            "mergeable": True,
+            "mergeable_state": "clean",
+            "html_url": "https://github.com/owner/repo/pull/22",
+        }
 
-        mock_pr = Mock()
-        mock_repo.get_pull.return_value = mock_pr
-        mock_pr.number = 22
-        mock_pr.title = "Test PR"
-        mock_pr.body = "Test body"
-        mock_pr.user.login = "dependabot[bot]"
-        mock_pr.head.sha = "abc123"
-        mock_pr.base.ref = "main"
-        mock_pr.head.ref = "update-deps"
-        mock_pr.state = "open"
-        mock_pr.mergeable = True
-        mock_pr.mergeable_state = "clean"
-        mock_pr.behind_by = 0
-        mock_pr.html_url = "https://github.com/owner/repo/pull/22"
+        # Mock file data
+        file_data = {
+            "filename": "requirements.txt",
+            "additions": 1,
+            "deletions": 1,
+            "changes": 2,
+            "status": "modified",
+        }
 
-        mock_file = Mock()
-        mock_file.filename = "requirements.txt"
-        mock_file.additions = 1
-        mock_file.deletions = 1
-        mock_file.changes = 2
-        mock_file.status = "modified"
-        mock_pr.get_files.return_value = [mock_file]
+        # Mock the async get method
+        async def mock_get(*args, **kwargs):
+            return pr_data
+
+        mock_async.get = mock_get
+
+        # Create an async iterator for get_paginated
+        async def async_iterator():
+            yield [file_data]
+
+        mock_async.get_paginated.return_value = async_iterator()
 
         client = GitHubClient(token="test_token")
         pr_info = client.get_pull_request_info("owner", "repo", 22)
@@ -126,27 +134,26 @@ class TestGitHubClient:
         assert not client.is_automation_author("human-user")
         assert not client.is_automation_author("random-bot")
 
-    @patch("dependamerge.github_client.Github")
-    def test_get_pull_request_commits(self, mock_github_class):
-        mock_github = Mock()
-        mock_github_class.return_value = mock_github
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_get_pull_request_commits(self, mock_async_class):
+        mock_async = Mock()
+        mock_async_class.return_value.__aenter__.return_value = mock_async
 
-        # Mock repository and PR
-        mock_repo = Mock()
-        mock_github.get_repo.return_value = mock_repo
+        # Mock commit data
+        commit_data = [
+            {
+                "commit": {
+                    "message": "Fix bug in authentication\n\nDetailed description"
+                }
+            },
+            {"commit": {"message": "Update tests"}},
+        ]
 
-        mock_pr = Mock()
-        mock_repo.get_pull.return_value = mock_pr
+        # Create an async iterator for get_paginated
+        async def async_iterator():
+            yield commit_data
 
-        # Mock commits
-        mock_commit1 = Mock()
-        mock_commit1.commit.message = (
-            "Fix bug in authentication\n\nDetailed description"
-        )
-        mock_commit2 = Mock()
-        mock_commit2.commit.message = "Update tests"
-
-        mock_pr.get_commits.return_value = [mock_commit1, mock_commit2]
+        mock_async.get_paginated.return_value = async_iterator()
 
         client = GitHubClient(token="test_token")
         commits = client.get_pull_request_commits("owner", "repo", 22)
@@ -155,22 +162,19 @@ class TestGitHubClient:
         assert commits[0] == "Fix bug in authentication\n\nDetailed description"
         assert commits[1] == "Update tests"
 
-        mock_github.get_repo.assert_called_once_with("owner/repo")
-        mock_repo.get_pull.assert_called_once_with(22)
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_get_pull_request_commits_empty(self, mock_async_class):
+        mock_async = Mock()
+        mock_async_class.return_value.__aenter__.return_value = mock_async
 
-    @patch("dependamerge.github_client.Github")
-    def test_get_pull_request_commits_empty(self, mock_github_class):
-        mock_github = Mock()
-        mock_github_class.return_value = mock_github
+        # Create an async iterator for empty commits
+        async def async_iterator():
+            yield []
 
-        mock_repo = Mock()
-        mock_github.get_repo.return_value = mock_repo
-
-        mock_pr = Mock()
-        mock_repo.get_pull.return_value = mock_pr
-        mock_pr.get_commits.return_value = []
+        mock_async.get_paginated.return_value = async_iterator()
 
         client = GitHubClient(token="test_token")
         commits = client.get_pull_request_commits("owner", "repo", 22)
 
+        assert len(commits) == 0
         assert commits == []

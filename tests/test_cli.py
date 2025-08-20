@@ -16,13 +16,19 @@ class TestCLI:
 
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.PRComparator")
-    def test_merge_command_dry_run(self, mock_comparator_class, mock_client_class):
+    @patch("dependamerge.github_service.GitHubService")
+    def test_merge_command_dry_run(
+        self, mock_service_class, mock_comparator_class, mock_client_class
+    ):
         # Setup mocks
         mock_client = Mock()
         mock_client_class.return_value = mock_client
 
         mock_comparator = Mock()
         mock_comparator_class.return_value = mock_comparator
+
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
 
         mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
         mock_client.is_automation_author.return_value = True
@@ -92,6 +98,16 @@ class TestCLI:
         )
         mock_comparator.compare_pull_requests.return_value = comparison_result
 
+        # Mock the GitHubService.find_similar_prs method as async
+        async def mock_find_similar_prs(*args, **kwargs):
+            return [(similar_pr, comparison_result)]
+
+        async def mock_close():
+            return None
+
+        mock_service.find_similar_prs = mock_find_similar_prs
+        mock_service.close = mock_close
+
         result = self.runner.invoke(
             app,
             [
@@ -157,8 +173,9 @@ class TestCLI:
 
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.github_service.GitHubService")
     def test_merge_command_no_similar_prs_merges_source(
-        self, mock_comparator_class, mock_client_class
+        self, mock_service_class, mock_comparator_class, mock_client_class
     ):
         """Test that when no similar PRs are found, the source PR is still merged."""
         # Setup mocks
@@ -167,6 +184,9 @@ class TestCLI:
 
         mock_comparator = Mock()
         mock_comparator_class.return_value = mock_comparator
+
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
 
         mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
         mock_client.is_automation_author.return_value = True
@@ -205,6 +225,16 @@ class TestCLI:
         mock_client.approve_pull_request.return_value = True
         mock_client.merge_pull_request.return_value = True
         mock_client.fix_out_of_date_pr.return_value = True
+
+        # Mock the GitHubService.find_similar_prs method as async to return no similar PRs
+        async def mock_find_similar_prs(*args, **kwargs):
+            return []
+
+        async def mock_close():
+            return None
+
+        mock_service.find_similar_prs = mock_find_similar_prs
+        mock_service.close = mock_close
 
         result = self.runner.invoke(
             app,
@@ -326,8 +356,9 @@ class TestCLI:
 
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.github_service.GitHubService")
     def test_merge_command_non_automation_pr_valid_override(
-        self, mock_comparator_class, mock_client_class
+        self, mock_service_class, mock_comparator_class, mock_client_class
     ):
         """Test that non-automation PR with valid override SHA proceeds."""
         mock_client = Mock()
@@ -335,6 +366,9 @@ class TestCLI:
 
         mock_comparator = Mock()
         mock_comparator_class.return_value = mock_comparator
+
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
 
         mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
         mock_client.is_automation_author.return_value = False
@@ -364,6 +398,16 @@ class TestCLI:
         mock_client.get_pr_status_details.return_value = "Ready to merge"
         mock_client.approve_pull_request.return_value = True
         mock_client.merge_pull_request.return_value = True
+
+        # Mock the GitHubService.find_similar_prs method as async to return no similar PRs
+        async def mock_find_similar_prs(*args, **kwargs):
+            return []
+
+        async def mock_close():
+            return None
+
+        mock_service.find_similar_prs = mock_find_similar_prs
+        mock_service.close = mock_close
 
         # Calculate the expected SHA for this test case
         combined_data = "human-user:Fix bug in authentication"

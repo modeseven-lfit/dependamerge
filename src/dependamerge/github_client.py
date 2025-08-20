@@ -2,22 +2,18 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 import os
+import asyncio
 from datetime import datetime
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-import requests
-import urllib3.exceptions
-from github import Github, GithubException
-from github.CommitStatus import CommitStatus
-from github.PullRequest import PullRequest
-from github.Repository import Repository
+
+
 
 from .models import (
     CopilotComment,
     FileChange,
     OrganizationScanResult,
     PullRequestInfo,
-    UnmergeablePR,
     UnmergeableReason,
 )
 
@@ -35,7 +31,7 @@ class GitHubClient:
             raise ValueError(
                 "GitHub token is required. Set GITHUB_TOKEN environment variable."
             )
-        self.github = Github(self.token)
+
 
     def parse_pr_url(self, url: str) -> tuple[str, str, int]:
         """Parse GitHub PR URL to extract owner, repo, and PR number."""
@@ -61,113 +57,101 @@ class GitHubClient:
     def get_pull_request_info(
         self, owner: str, repo: str, pr_number: int
     ) -> PullRequestInfo:
-        """Get detailed information about a pull request."""
-        try:
-            repository = self.github.get_repo(f"{owner}/{repo}")
-            pr = repository.get_pull(pr_number)
+        """Get detailed information about a pull request using the async REST client."""
+        from .github_async import GitHubAsync
 
-            # Get file changes
-            files_changed = []
-            for file in pr.get_files():
-                files_changed.append(
-                    FileChange(
-                        filename=file.filename,
-                        additions=file.additions,
-                        deletions=file.deletions,
-                        changes=file.changes,
-                        status=file.status,
-                    )
+        async def _run() -> PullRequestInfo:
+            async with GitHubAsync(token=self.token) as api:
+                pr: Dict[str, Any] = await api.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
+                files_changed: List[FileChange] = []
+                try:
+                    async for page in api.get_paginated(
+                        f"/repos/{owner}/{repo}/pulls/{pr_number}/files", per_page=100
+                    ):
+                        for f in page:
+                            file_data = f
+                            assert isinstance(file_data, dict)
+                            files_changed.append(
+                                FileChange(
+                                    filename=file_data.get("filename", ""),
+                                    additions=int(file_data.get("additions", 0)),
+                                    deletions=int(file_data.get("deletions", 0)),
+                                    changes=int(file_data.get("changes", (file_data.get("additions", 0) or 0) + (file_data.get("deletions", 0) or 0))),
+                                    status=file_data.get("status", "modified"),
+                                )
+                            )
+                except Exception:
+                    # If pagination of files fails, continue with what we have
+                    pass
+
+                return PullRequestInfo(
+                    number=int(pr.get("number", pr_number)),
+                    title=pr.get("title") or "",
+                    body=pr.get("body"),
+                    author=((pr.get("user") or {}).get("login") or ""),
+                    head_sha=((pr.get("head") or {}).get("sha") or ""),
+                    base_branch=((pr.get("base") or {}).get("ref") or ""),
+                    head_branch=((pr.get("head") or {}).get("ref") or ""),
+                    state=pr.get("state") or "open",
+                    mergeable=pr.get("mergeable"),
+                    mergeable_state=pr.get("mergeable_state"),
+                    behind_by=None,
+                    files_changed=files_changed,
+                    repository_full_name=f"{owner}/{repo}",
+                    html_url=pr.get("html_url") or "",
                 )
 
-            return PullRequestInfo(
-                number=pr.number,
-                title=pr.title,
-                body=pr.body,
-                author=pr.user.login,
-                head_sha=pr.head.sha,
-                base_branch=pr.base.ref,
-                head_branch=pr.head.ref,
-                state=pr.state,
-                mergeable=pr.mergeable,
-                mergeable_state=pr.mergeable_state,
-                behind_by=getattr(pr, "behind_by", None),
-                files_changed=files_changed,
-                repository_full_name=repository.full_name,
-                html_url=pr.html_url,
-            )
-        except (
-            urllib3.exceptions.NameResolutionError,
-            urllib3.exceptions.MaxRetryError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-            requests.exceptions.RequestException,
-        ) as e:
-            raise RuntimeError(f"Network error while fetching PR info: {e}") from e
-        except GithubException as e:
-            raise RuntimeError(f"Failed to fetch PR info: {e}") from e
+        return asyncio.run(_run())  # type: ignore[no-any-return]
 
     def get_pull_request_commits(
         self, owner: str, repo: str, pr_number: int
     ) -> List[str]:
-        """Get commit messages from a pull request."""
-        try:
-            repository = self.github.get_repo(f"{owner}/{repo}")
-            pr = repository.get_pull(pr_number)
+        """Get commit messages from a pull request using the async REST client."""
+        from .github_async import GitHubAsync
 
-            commits = pr.get_commits()
-            commit_messages = []
+        async def _run() -> List[str]:
+            messages: List[str] = []
+            async with GitHubAsync(token=self.token) as api:
+                async for page in api.get_paginated(
+                    f"/repos/{owner}/{repo}/pulls/{pr_number}/commits", per_page=100
+                ):
+                    for c in page:
+                        commit_data = c
+                        assert isinstance(commit_data, dict)
+                        msg = ((commit_data.get("commit") or {}).get("message") or "")
+                        if msg:
+                            messages.append(msg)
+            return messages
 
-            for commit in commits:
-                if commit.commit.message:
-                    commit_messages.append(commit.commit.message)
+        return asyncio.run(_run())
 
-            return commit_messages
-        except (
-            urllib3.exceptions.NameResolutionError,
-            urllib3.exceptions.MaxRetryError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-            requests.exceptions.RequestException,
-        ) as e:
-            raise RuntimeError(f"Network error while fetching PR commits: {e}") from e
-        except GithubException as e:
-            raise RuntimeError(f"Failed to fetch PR commits: {e}") from e
+    def get_organization_repositories(self, org_name: str) -> List[str]:
+        """Get all repositories in an organization using REST API. Returns list of full_name strings."""
+        from .github_async import GitHubAsync
 
-    def get_organization_repositories(self, org_name: str) -> List[Repository]:
-        """Get all repositories in an organization."""
-        try:
-            org = self.github.get_organization(org_name)
-            return list(org.get_repos())
-        except (
-            urllib3.exceptions.NameResolutionError,
-            urllib3.exceptions.MaxRetryError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-            requests.exceptions.RequestException,
-        ) as e:
-            raise RuntimeError(
-                f"Network error while fetching organization repositories: {e}"
-            ) from e
-        except GithubException as e:
-            raise RuntimeError(f"Failed to fetch organization repositories: {e}") from e
+        async def _run() -> List[str]:
+            repos: List[str] = []
+            async with GitHubAsync(token=self.token) as api:
+                try:
+                    async for page in api.get_paginated(
+                        f"/orgs/{org_name}/repos", per_page=100
+                    ):
+                        for r in page:
+                            repo_data = r
+                            assert isinstance(repo_data, dict)
+                            full = repo_data.get("full_name")
+                            if full:
+                                repos.append(full)
+                except Exception:
+                    # Fall back to empty list on pagination issues
+                    pass
+            return repos
 
-    def get_open_pull_requests(self, repository: Repository) -> List[PullRequest]:
-        """Get all open pull requests for a repository."""
-        try:
-            return list(repository.get_pulls(state="open"))
-        except (
-            urllib3.exceptions.NameResolutionError,
-            urllib3.exceptions.MaxRetryError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-            requests.exceptions.RequestException,
-        ) as e:
-            raise RuntimeError(
-                f"Network error while fetching PRs for {repository.full_name}: {e}"
-            ) from e
-        except GithubException as e:
-            print(f"Warning: Failed to fetch PRs for {repository.full_name}: {e}")
-            return []
+        return asyncio.run(_run())
+
+    def get_open_pull_requests(self, repository) -> List[Any]:
+        """Legacy method not supported in async-only client. Use async service for PR enumeration."""
+        return []
 
     def approve_pull_request(
         self,
@@ -176,34 +160,33 @@ class GitHubClient:
         pr_number: int,
         message: str = "Auto-approved by dependamerge",
     ) -> bool:
-        """Approve a pull request."""
+        """Approve a pull request using the async REST client."""
         try:
-            repository = self.github.get_repo(f"{owner}/{repo}")
-            pr = repository.get_pull(pr_number)
-            pr.create_review(body=message, event="APPROVE")
-            return True
-        except GithubException as e:
+            from .github_async import GitHubAsync
+
+            async def _run():
+                async with GitHubAsync(token=self.token) as api:
+                    await api.approve_pull_request(owner, repo, pr_number, message)
+                    return True
+
+            return bool(asyncio.run(_run()))
+        except Exception as e:
             print(f"Failed to approve PR {pr_number}: {e}")
             return False
 
     def merge_pull_request(
         self, owner: str, repo: str, pr_number: int, merge_method: str = "merge"
     ) -> bool:
-        """Merge a pull request with detailed error handling."""
+        """Merge a pull request using the async REST client."""
         try:
-            repository = self.github.get_repo(f"{owner}/{repo}")
-            pr = repository.get_pull(pr_number)
+            from .github_async import GitHubAsync
 
-            # Check if PR can be merged based on mergeable state and mergeable flag
-            if not self._should_attempt_merge(pr):
-                print(
-                    f"PR {pr_number} is not mergeable (state: {pr.mergeable_state}, mergeable: {pr.mergeable})."
-                )
-                return False
+            async def _run():
+                async with GitHubAsync(token=self.token) as api:
+                    return await api.merge_pull_request(owner, repo, pr_number, merge_method)
 
-            result = pr.merge(merge_method=merge_method)
-            return bool(result.merged)
-        except GithubException as e:
+            return bool(asyncio.run(_run()))
+        except Exception as e:
             print(f"Failed to merge PR {pr_number}: {e}")
             return False
 
@@ -260,71 +243,42 @@ class GitHubClient:
         return f"Status unclear ({pr_info.mergeable_state or 'unknown'})"
 
     def _analyze_block_reason(self, pr_info: PullRequestInfo) -> str:
-        """Analyze why a PR is blocked and return appropriate status."""
+        """Analyze why a PR is blocked and return appropriate status using REST."""
         try:
+            from .github_async import GitHubAsync
+
             repo_owner, repo_name = pr_info.repository_full_name.split("/")
-            repository = self.github.get_repo(f"{repo_owner}/{repo_name}")
-            pr = repository.get_pull(pr_info.number)
 
-            # Check if there are any reviews
-            reviews = list(pr.get_reviews())
-            approved_reviews = [r for r in reviews if r.state == "APPROVED"]
+            async def _run():
+                async with GitHubAsync(token=self.token) as api:
+                    # Reviews
+                    approved = False
+                    try:
+                        reviews = await api.get(f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}/reviews")
+                        approved = any(r.get("state") == "APPROVED" for r in reviews)
+                    except Exception:
+                        pass
 
-            # Check commit status and check runs
-            commit = repository.get_commit(pr.head.sha)
+                    # Check runs - look for failing
+                    failing = False
+                    try:
+                        runs = await api.get(f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/check-runs")
+                        for run in (runs.get("check_runs") or []):
+                            run_data = run
+                            if run_data.get("conclusion") in ["failure", "cancelled", "timed_out"]:
+                                failing = True
+                                break
+                    except Exception:
+                        pass
 
-            # Get commit statuses (legacy status API) and get latest per context
-            # Use pagination to avoid loading all statuses at once for repos with many checks
-            latest_statuses: Dict[str, CommitStatus] = {}
-            for status in commit.get_statuses():
-                context = status.context
-                if (
-                    context not in latest_statuses
-                    or status.updated_at > latest_statuses[context].updated_at
-                ):
-                    latest_statuses[context] = status
-                # Limit to first 50 statuses to avoid performance issues
-                if len(latest_statuses) >= 50:
-                    break
+                    if failing:
+                        return "Blocked by failing checks"
+                    if not approved:
+                        return "Requires approval"
+                    return "Blocked by branch protection"
 
-            failing_statuses = [
-                s for s in latest_statuses.values() if s.state in ["failure", "error"]
-            ]
-            pending_statuses = [
-                s for s in latest_statuses.values() if s.state == "pending"
-            ]
-
-            # Get check runs (GitHub Actions, etc.) - limit to avoid performance issues
-            check_runs = list(commit.get_check_runs()[:50])
-            failing_checks = [
-                c
-                for c in check_runs
-                if c.conclusion in ["failure", "cancelled", "timed_out"]
-            ]
-            pending_checks = [
-                c for c in check_runs if c.status in ["queued", "in_progress"]
-            ]
-
-            # Determine the primary blocking reason - prioritize review requirements
-            if failing_statuses or failing_checks:
-                return "Blocked by failing checks"
-            elif not approved_reviews:
-                # Check if there are any real pending checks (not just stale statuses)
-                if (
-                    pending_checks
-                ):  # Only consider pending check runs, not stale statuses
-                    return "Blocked by pending checks"
-                else:
-                    # All checks passed but no approval - needs review
-                    return "Requires approval"
-            elif pending_statuses or pending_checks:
-                return "Blocked by pending checks"
-            else:
-                # Has approvals but still blocked - might be other branch protection rules
-                return "Blocked by branch protection"
-
+            return asyncio.run(_run())  # type: ignore[no-any-return]
         except Exception:
-            # Fallback if we can't analyze the specific reason
             return "Blocked"
 
     def _should_attempt_merge(self, pr) -> bool:
@@ -355,161 +309,48 @@ class GitHubClient:
     def fix_out_of_date_pr(self, owner: str, repo: str, pr_number: int) -> bool:
         """Fix an out-of-date PR by updating the branch."""
         try:
-            repository = self.github.get_repo(f"{owner}/{repo}")
-            pr = repository.get_pull(pr_number)
+            from .github_async import GitHubAsync
 
-            if pr.mergeable_state != "behind":
-                print(f"PR {pr_number} is not behind the base branch")
-                return False
+            async def _run():
+                async with GitHubAsync(token=self.token) as api:
+                    await api.update_branch(owner, repo, pr_number)
+                    return True
 
-            # Update the branch using GitHub's update branch API
-            pr.update_branch()
-            return True
-        except GithubException as e:
+            return bool(asyncio.run(_run()))
+        except Exception as e:
             print(f"Failed to update PR {pr_number}: {e}")
             return False
 
     def scan_organization_for_unmergeable_prs(
         self, org_name: str, progress_tracker: Optional["ProgressTracker"] = None
     ) -> OrganizationScanResult:
-        """Scan an entire GitHub organization for unmergeable pull requests.
-
-        Args:
-            org_name: Name of the GitHub organization to scan
-            progress_tracker: Optional progress tracker for real-time updates
-        """
+        """Scan an entire GitHub organization for unmergeable pull requests using the async service."""
         scan_timestamp = datetime.now().isoformat()
-        errors = []
-        unmergeable_prs = []
-        total_prs = 0
-        scanned_repositories = 0
+        from .github_service import GitHubService
+
+        async def _run():
+            svc = GitHubService(token=self.token, progress_tracker=progress_tracker)
+            try:
+                return await svc.scan_organization(org_name)
+            finally:
+                await svc.close()
 
         try:
-            if progress_tracker:
-                progress_tracker.update_operation("Getting organization details...")
-            org = self.github.get_organization(org_name)
-
-            if progress_tracker:
-                progress_tracker.update_operation("Listing repositories...")
-            repositories = list(org.get_repos())
-            total_repositories = len(repositories)
-
-            if progress_tracker:
-                progress_tracker.update_total_repositories(total_repositories)
-
-            for repo in repositories:
-                try:
-                    if progress_tracker:
-                        progress_tracker.start_repository(repo.full_name)
-
-                    scanned_repositories += 1
-                    repo_unmergeable_prs = self._scan_repository_for_unmergeable_prs(
-                        repo, progress_tracker
-                    )
-                    unmergeable_prs.extend(repo_unmergeable_prs)
-
-                    # Count all open PRs in this repository
-                    if progress_tracker:
-                        progress_tracker.update_operation(f"Counting PRs in {repo.full_name}")
-                    repo_prs = list(repo.get_pulls(state='open'))
-                    total_prs += len(repo_prs)
-
-                    if progress_tracker:
-                        progress_tracker.complete_repository(len(repo_unmergeable_prs))
-
-                except Exception as e:
-                    if progress_tracker:
-                        progress_tracker.add_error()
-                    errors.append(f"Error scanning repository {repo.full_name}: {str(e)}")
-                    continue
-
+            return asyncio.run(_run())  # type: ignore[no-any-return]
         except Exception as e:
-            errors.append(f"Error accessing organization {org_name}: {str(e)}")
-            total_repositories = 0
+            return OrganizationScanResult(
+                organization=org_name,
+                total_repositories=0,
+                scanned_repositories=0,
+                total_prs=0,
+                unmergeable_prs=[],
+                scan_timestamp=scan_timestamp,
+                errors=[f"{e}"],
+            )
 
-        return OrganizationScanResult(
-            organization=org_name,
-            total_repositories=total_repositories,
-            scanned_repositories=scanned_repositories,
-            total_prs=total_prs,
-            unmergeable_prs=unmergeable_prs,
-            scan_timestamp=scan_timestamp,
-            errors=errors
-        )
 
-    def _scan_repository_for_unmergeable_prs(
-        self, repo: Repository, progress_tracker: Optional["ProgressTracker"] = None
-    ) -> List[UnmergeablePR]:
-        """Scan a single repository for unmergeable pull requests.
 
-        Args:
-            repo: GitHub repository to scan
-            progress_tracker: Optional progress tracker for real-time updates
-        """
-        unmergeable_prs = []
-
-        try:
-            # Get all open pull requests
-            prs = repo.get_pulls(state='open')
-
-            for pr in prs:
-                try:
-                    if progress_tracker:
-                        progress_tracker.analyze_pr(pr.number, repo.full_name)
-
-                    # Skip PRs with incomplete data
-                    if not pr.user or not pr.title or not pr.html_url:
-                        if progress_tracker:
-                            progress_tracker.add_error()
-                            progress_tracker.update_operation(f"Skipping incomplete PR #{pr.number} in {repo.full_name}")
-                        continue
-
-                    # Check if PR is unmergeable
-                    unmergeable_reasons = self._analyze_pr_mergeability(pr)
-
-                    if unmergeable_reasons:
-                        if progress_tracker:
-                            progress_tracker.update_operation(
-                                f"Getting Copilot comments for PR #{pr.number}"
-                            )
-                        # Get Copilot comments count
-                        copilot_comments = self._get_copilot_comments(pr)
-
-                        # Safe date handling
-                        created_at = pr.created_at.isoformat() if pr.created_at else datetime.now().isoformat()
-                        updated_at = pr.updated_at.isoformat() if pr.updated_at else datetime.now().isoformat()
-
-                        unmergeable_pr = UnmergeablePR(
-                            repository=repo.full_name,
-                            pr_number=pr.number,
-                            title=pr.title,
-                            author=pr.user.login,
-                            url=pr.html_url,
-                            reasons=unmergeable_reasons,
-                            copilot_comments_count=len(copilot_comments),
-                            copilot_comments=copilot_comments,
-                            created_at=created_at,
-                            updated_at=updated_at
-                        )
-
-                        unmergeable_prs.append(unmergeable_pr)
-
-                except Exception:
-                    if progress_tracker:
-                        progress_tracker.add_error()
-                        progress_tracker.update_operation(f"Error analyzing PR #{pr.number} in {repo.full_name} - continuing...")
-                    # Silently handle errors to avoid spamming the console
-                    continue
-
-        except Exception:
-            # Silently handle repository-level errors
-            if progress_tracker:
-                progress_tracker.add_error()
-                progress_tracker.update_operation(f"Error accessing repository {repo.full_name} - skipping...")
-
-        return unmergeable_prs
-
-    def _analyze_pr_mergeability(self, pr: PullRequest) -> List[UnmergeableReason]:
+    def _analyze_pr_mergeability(self, pr: Any) -> List[UnmergeableReason]:
         """Analyze a PR to determine why it cannot be merged."""
         reasons = []
 
@@ -558,7 +399,7 @@ class GitHubClient:
 
         return filtered_reasons
 
-    def _get_failing_status_checks(self, pr: PullRequest) -> List[str]:
+    def _get_failing_status_checks(self, pr: Any) -> List[str]:
         """Get list of failing status check names for a PR."""
         failing_checks: List[str] = []
 
@@ -574,7 +415,7 @@ class GitHubClient:
             commit = pr.head.repo.get_commit(pr.head.sha)
 
             # Get commit statuses (legacy status API)
-            latest_statuses: Dict[str, CommitStatus] = {}
+            latest_statuses: Dict[str, Any] = {}
             for status in commit.get_statuses():
                 context = status.context
                 if (
@@ -601,7 +442,7 @@ class GitHubClient:
                 # Some repos may not have check runs available
                 pass
 
-        except Exception as e:
+        except Exception:
             # Silently handle errors to avoid spamming the console
             # Most common errors are permission issues or deleted forks
             pass
@@ -625,7 +466,7 @@ class GitHubClient:
 
         return True
 
-    def _has_blocking_reviews(self, pr: PullRequest) -> bool:
+    def _has_blocking_reviews(self, pr) -> bool:
         """Check if PR has blocking review requests."""
         try:
             reviews = list(pr.get_reviews())
@@ -641,7 +482,7 @@ class GitHubClient:
 
         return False
 
-    def _get_copilot_comments(self, pr: PullRequest) -> List[CopilotComment]:
+    def _get_copilot_comments(self, pr: Any) -> List[CopilotComment]:
         """Get unresolved Copilot feedback comments for a PR."""
         copilot_comments = []
 

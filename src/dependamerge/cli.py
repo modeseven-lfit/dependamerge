@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 import hashlib
+import os
+import asyncio
 from typing import List, Optional, Tuple
 
 import requests
@@ -9,7 +11,6 @@ import typer
 from typer.core import TyperGroup
 import click
 import urllib3.exceptions
-from github.Repository import Repository
 from rich.console import Console
 from rich.table import Table
 
@@ -38,7 +39,7 @@ class DefaultCommandGroup(TyperGroup):
 
 app = typer.Typer(
     cls=DefaultCommandGroup,
-    help="Scan GitHub organizations for unmergeable PRs and automatically merge pull requests"
+    help="Find blocked PRs in GitHub organizations and automatically merge pull requests"
 )
 console = Console(markup=False)
 
@@ -141,11 +142,11 @@ def merge(
             progress_tracker.start()
             # Check if Rich display is available
             if not progress_tracker.rich_available:
-                console.print(f"Analyzing PR: {pr_url}")
+                console.print(f"🔍 Examining source pull request in {owner}...")
                 console.print("Progress updates will be shown as simple text...")
-            progress_tracker.update_operation(f"Analyzing source PR #{pr_number}")
+            progress_tracker.update_operation("Getting source PR details...")
         else:
-            console.print(f"Analyzing PR: {pr_url}")
+            console.print(f"🔍 Examining source pull request in {owner}...")
 
         # Initialize comparator
         comparator = PRComparator(similarity_threshold)
@@ -172,7 +173,7 @@ def merge(
             raise typer.Exit(1) from e
 
         # Display source PR info
-        _display_pr_info(source_pr, "Source PR", github_client)
+        _display_pr_info(source_pr, "Source PR", github_client, progress_tracker=progress_tracker)
 
         # Check if source PR is from automation or has valid override
         if not github_client.is_automation_author(source_pr.author):
@@ -214,10 +215,10 @@ def merge(
         if progress_tracker:
             progress_tracker.update_operation("Getting organization repositories...")
         else:
-            console.print(f"\nScanning organization: {owner}")
+            console.print(f"\nChecking organization: {owner}")
 
         try:
-            repositories: List[Repository] = (
+            repositories: List[str] = (
                 github_client.get_organization_repositories(owner)
             )
         except (
@@ -253,71 +254,25 @@ def merge(
         # Find matching PRs across all repositories
         all_similar_prs = []
 
-        for repo_index, repository in enumerate(repositories):
-            if progress_tracker:
-                progress_tracker.start_repository(repository.full_name)
-                progress_tracker.update_operation(f"Getting open PRs from {repository.full_name}")
+        from .github_service import GitHubService
+        if progress_tracker:
+            progress_tracker.update_operation("Listing repositories...")
 
+        async def _find_similar():
+            svc = GitHubService(token=token, progress_tracker=progress_tracker)
             try:
-                open_prs = github_client.get_open_pull_requests(repository)
+                only_automation = github_client.is_automation_author(source_pr.author)
+                return await svc.find_similar_prs(
+                    owner,
+                    source_pr,
+                    comparator,
+                    only_automation=only_automation,
+                )
+            finally:
+                await svc.close()
 
-                if progress_tracker:
-                    progress_tracker.update_operation(f"Analyzing {len(open_prs)} PRs in {repository.full_name}")
+        all_similar_prs = asyncio.run(_find_similar())
 
-                matching_prs_in_repo = []
-                for pr in open_prs:
-                    if pr.number == source_pr.number and repository.full_name == source_pr.repository_full_name:
-                        continue  # Skip the source PR itself
-
-                    # Check if PR should be considered based on override status
-                    is_automation = github_client.is_automation_author(pr.user.login)
-                    source_is_automation = github_client.is_automation_author(source_pr.author)
-
-                    # If source PR is automation, only consider automation PRs
-                    # If source PR is non-automation with override, only consider non-automation PRs from same author
-                    if source_is_automation:
-                        if not is_automation:
-                            continue
-                    else:
-                        if is_automation or pr.user.login != source_pr.author:
-                            continue
-
-                    if progress_tracker:
-                        progress_tracker.analyze_pr(pr.number, repository.full_name)
-
-                    target_pr = PullRequestInfo(
-                        number=pr.number,
-                        title=pr.title,
-                        body=pr.body,
-                        author=pr.user.login,
-                        head_sha=pr.head.sha,
-                        base_branch=pr.base.ref,
-                        head_branch=pr.head.ref,
-                        state=pr.state,
-                        mergeable=pr.mergeable,
-                        mergeable_state=pr.mergeable_state,
-                        behind_by=getattr(pr, "behind_by", None),
-                        files_changed=[],  # We'll populate this if needed
-                        repository_full_name=repository.full_name,
-                        html_url=pr.html_url,
-                    )
-
-                    comparison = comparator.compare_pull_requests(source_pr, target_pr)
-                    if comparison.is_similar:
-                        matching_prs_in_repo.append((target_pr, comparison))
-                        if progress_tracker:
-                            progress_tracker.found_similar_pr()
-
-                all_similar_prs.extend(matching_prs_in_repo)
-
-                if progress_tracker:
-                    progress_tracker.complete_repository(len(matching_prs_in_repo))
-
-            except Exception as e:
-                if progress_tracker:
-                    progress_tracker.add_error()
-                console.print(f"Warning: Error scanning {repository.full_name}: {e}")
-                continue
 
         # Stop progress tracker and show results
         if progress_tracker:
@@ -409,7 +364,7 @@ def merge(
         raise typer.Exit(1) from e
 
 
-def _display_pr_info(pr: PullRequestInfo, title: str, github_client: GitHubClient) -> None:
+def _display_pr_info(pr: PullRequestInfo, title: str, github_client: GitHubClient, progress_tracker: Optional[ProgressTracker] = None) -> None:
     """Display pull request information in a formatted table."""
     table = Table(title=title)
     table.add_column("Property", style="cyan")
@@ -427,7 +382,11 @@ def _display_pr_info(pr: PullRequestInfo, title: str, github_client: GitHubClien
     table.add_row("Files Changed", str(len(pr.files_changed)))
     table.add_row("URL", pr.html_url)
 
+    if progress_tracker:
+        progress_tracker.suspend()
     console.print(table)
+    if progress_tracker:
+        progress_tracker.resume()
 
 
 def _merge_single_pr(
@@ -544,26 +503,24 @@ def _merge_single_pr(
 
 
 @app.command()
-def scan(
-    organization: str = typer.Argument(..., help="GitHub organization name to scan"),
+def blocked(
+    organization: str = typer.Argument(..., help="GitHub organization name to check for blocked PRs"),
     token: Optional[str] = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
     ),
     output_format: str = typer.Option(
         "table", "--format", help="Output format: table, json"
     ),
-    show_copilot: bool = typer.Option(
-        True, "--show-copilot/--hide-copilot", help="Show Copilot comment counts"
-    ),
+
     show_progress: bool = typer.Option(
         True, "--progress/--no-progress", help="Show real-time progress updates"
     ),
 ):
     """
-    Scan a GitHub organization for unmergeable pull requests.
+    Find blocked pull requests in a GitHub organization.
 
     This command will:
-    1. Scan all repositories in the organization
+    1. Check all repositories in the organization
     2. Identify pull requests that cannot be merged
     3. Report blocking reasons (conflicts, failing checks, etc.)
     4. Count unresolved Copilot feedback comments
@@ -574,24 +531,28 @@ def scan(
     progress_tracker = None
 
     try:
-        # Initialize GitHub client
-        github_client = GitHubClient(token)
-
         if show_progress:
             progress_tracker = ProgressTracker(organization)
             progress_tracker.start()
             # Check if Rich display is available
             if not progress_tracker.rich_available:
-                console.print(f"🔍 Scanning organization: {organization}")
+                console.print(f"🔍 Checking organization: {organization}")
                 console.print("Progress updates will be shown as simple text...")
         else:
-            console.print(f"🔍 Scanning organization: {organization}")
+            console.print(f"🔍 Checking organization: {organization}")
             console.print("This may take a few minutes for large organizations...")
 
         # Perform the scan
-        scan_result = github_client.scan_organization_for_unmergeable_prs(
-            organization, progress_tracker
-        )
+        from .github_service import GitHubService
+
+        async def _run_blocked_check():
+            svc = GitHubService(token=token, progress_tracker=progress_tracker)
+            try:
+                return await svc.scan_organization(organization)
+            finally:
+                await svc.close()
+
+        scan_result = asyncio.run(_run_blocked_check())
 
         # Stop progress tracker before displaying results
         if progress_tracker:
@@ -603,25 +564,25 @@ def scan(
 
             # Show scan summary
             summary = progress_tracker.get_summary()
-            console.print(f"✅ Scan completed in {summary['elapsed_time']}")
+            console.print(f"✅ Check completed in {summary['elapsed_time']}")
             console.print(f"📊 Analyzed {summary['total_prs_analyzed']} PRs across {summary['completed_repositories']} repositories")
             if summary['errors_count'] > 0:
-                console.print(f"⚠️  {summary['errors_count']} errors encountered during scan")
+                console.print(f"⚠️  {summary['errors_count']} errors encountered during check")
             console.print()  # Add blank line before results
 
         # Display results
-        _display_scan_results(scan_result, output_format, show_copilot)
+        _display_blocked_results(scan_result, output_format)
 
     except Exception as e:
-        # Ensure progress tracker is stopped even if scan fails
+        # Ensure progress tracker is stopped even if check fails
         if progress_tracker:
             progress_tracker.stop()
         console.print(f"Error: {e}")
         raise typer.Exit(1) from e
 
 
-def _display_scan_results(scan_result, output_format: str, show_copilot: bool):
-    """Display the organization scan results."""
+def _display_blocked_results(scan_result, output_format: str):
+    """Display the organization blocked PR results."""
 
     if output_format == "json":
         import json
@@ -633,13 +594,47 @@ def _display_scan_results(scan_result, output_format: str, show_copilot: bool):
         console.print("🎉 No unmergeable pull requests found!")
         return
 
-    # Create summary table
-    summary_table = Table(title=f"Organization Scan Summary: {scan_result.organization}")
-    summary_table.add_column("Metric", style="cyan")
+    # Create detailed blocked PRs table
+    pr_table = Table(title=f"Blocked Pull Requests: {scan_result.organization}")
+    pr_table.add_column("Repository", style="cyan")
+    pr_table.add_column("PR", style="white")
+    pr_table.add_column("Title", style="white", max_width=40)
+    pr_table.add_column("Author", style="white")
+    pr_table.add_column("Blocking Reasons", style="yellow")
+
+    # Only show Copilot column if there are any copilot comments
+    show_copilot_col = any(p.copilot_comments_count > 0 for p in scan_result.unmergeable_prs)
+    if show_copilot_col:
+        pr_table.add_column("Copilot", style="blue")
+
+    for pr in scan_result.unmergeable_prs:
+        reasons = [reason.description for reason in pr.reasons]
+        reasons_text = "\n".join(reasons) if reasons else "Unknown"
+
+        row_data = [
+            pr.repository.split("/", 1)[1] if "/" in pr.repository else pr.repository,
+            f"#{pr.pr_number}",
+            pr.title,
+            pr.author,
+            reasons_text
+        ]
+
+        # Add Copilot count if column is shown
+        if show_copilot_col:
+            row_data.append(str(pr.copilot_comments_count))
+
+        pr_table.add_row(*row_data)
+
+    console.print(pr_table)
+    console.print()
+
+    # Create summary table (moved to bottom)
+    summary_table = Table()
+    summary_table.add_column("Summary", style="cyan")
     summary_table.add_column("Value", style="white")
 
     summary_table.add_row("Total Repositories", str(scan_result.total_repositories))
-    summary_table.add_row("Scanned Repositories", str(scan_result.scanned_repositories))
+    summary_table.add_row("Checked Repositories", str(scan_result.scanned_repositories))
     summary_table.add_row("Total Open PRs", str(scan_result.total_prs))
     summary_table.add_row("Unmergeable PRs", str(len(scan_result.unmergeable_prs)))
 
@@ -647,42 +642,11 @@ def _display_scan_results(scan_result, output_format: str, show_copilot: bool):
         summary_table.add_row("Errors", str(len(scan_result.errors)), style="red")
 
     console.print(summary_table)
-    console.print()
-
-    # Create detailed unmergeable PRs table
-    pr_table = Table(title="Unmergeable Pull Requests")
-    pr_table.add_column("Repository", style="cyan")
-    pr_table.add_column("PR", style="white")
-    pr_table.add_column("Title", style="white", max_width=40)
-    pr_table.add_column("Author", style="yellow")
-    pr_table.add_column("Blocking Reasons", style="red")
-
-    if show_copilot:
-        pr_table.add_column("Copilot Comments", style="blue")
-
-    for pr in scan_result.unmergeable_prs:
-        reasons = [reason.description for reason in pr.reasons]
-        reasons_text = "\n".join(reasons) if reasons else "Unknown"
-
-        row_data = [
-            pr.repository,
-            f"#{pr.pr_number}",
-            pr.title,
-            pr.author,
-            reasons_text
-        ]
-
-        if show_copilot:
-            row_data.append(str(pr.copilot_comments_count))
-
-        pr_table.add_row(*row_data)
-
-    console.print(pr_table)
 
     # Show errors if any
     if scan_result.errors:
         console.print()
-        error_table = Table(title="Errors Encountered During Scan")
+        error_table = Table(title="Errors Encountered During Check")
         error_table.add_column("Error", style="red")
 
         for error in scan_result.errors:
