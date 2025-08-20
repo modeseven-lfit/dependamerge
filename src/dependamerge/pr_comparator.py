@@ -16,21 +16,25 @@ class PRComparator:
         self.similarity_threshold = similarity_threshold
 
     def compare_pull_requests(
-        self, source_pr: PullRequestInfo, target_pr: PullRequestInfo
+        self, source_pr: PullRequestInfo, target_pr: PullRequestInfo, only_automation: bool = True
     ) -> ComparisonResult:
         """Compare two pull requests and determine similarity."""
         reasons = []
         scores = []
 
-        # Check if both are from automation tools
-        if not self._is_automation_pr(source_pr) or not self._is_automation_pr(
-            target_pr
-        ):
-            return ComparisonResult(
-                is_similar=False,
-                confidence_score=0.0,
-                reasons=["One or both PRs are not from automation tools"],
-            )
+        # Check automation requirements based on mode
+        if only_automation:
+            # Both PRs must be from automation tools
+            if not self._is_automation_pr(source_pr) or not self._is_automation_pr(target_pr):
+                return ComparisonResult(
+                    is_similar=False,
+                    confidence_score=0.0,
+                    reasons=["One or both PRs are not from automation tools"],
+                )
+        else:
+            # For non-automation mode, we expect the service already filtered by same author
+            # so we don't need additional automation checks here
+            pass
 
         # Compare titles
         title_score = self._compare_titles(source_pr.title, target_pr.title)

@@ -65,7 +65,7 @@ query($org: String!, $reposCursor: String) {
           nodes {
             number
             title
-            bodyText
+            body
             url
             isDraft
             author { login }
@@ -141,7 +141,7 @@ query($owner: String!, $name: String!, $prsCursor: String, $prsPageSize: Int!, $
       nodes {
         number
         title
-        bodyText
+        body
         url
         isDraft
         author { login }
