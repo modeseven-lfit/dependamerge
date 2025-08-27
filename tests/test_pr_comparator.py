@@ -447,3 +447,221 @@ class TestPRComparator:
         assert (
             "One or both PRs are not from automation tools" in result_automation.reasons
         )
+
+    def test_github_actions_workflow_file_similarity(self):
+        """Test that GitHub Actions workflow files get partial similarity even with different names."""
+        comparator = PRComparator(0.8)
+
+        # Create PR with semantic-pull-request.yaml workflow
+        pr1 = PullRequestInfo(
+            number=15,
+            title="Chore: Bump amannn/action-semantic-pull-request from 6.0.1 to 6.1.1",
+            body="Bumps [amannn/action-semantic-pull-request](https://github.com/amannn/action-semantic-pull-request) from 6.0.1 to 6.1.1.",
+            author="dependabot[bot]",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="dependabot/github_actions/amannn/action-semantic-pull-request-6.1.1",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[
+                FileChange(
+                    filename=".github/workflows/semantic-pull-request.yaml",
+                    additions=1,
+                    deletions=1,
+                    changes=2,
+                    status="modified",
+                )
+            ],
+            repository_full_name="org/repo1",
+            html_url="https://github.com/org/repo1/pull/15",
+        )
+
+        # Create PR with ci.yml workflow (different filename)
+        pr2 = PullRequestInfo(
+            number=23,
+            title="Chore: Bump amannn/action-semantic-pull-request from 6.0.1 to 6.1.1",
+            body="Bumps [amannn/action-semantic-pull-request](https://github.com/amannn/action-semantic-pull-request) from 6.0.1 to 6.1.1.",
+            author="dependabot[bot]",
+            head_sha="def456",
+            base_branch="main",
+            head_branch="dependabot/github_actions/amannn/action-semantic-pull-request-6.1.1",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[
+                FileChange(
+                    filename=".github/workflows/ci.yml",
+                    additions=1,
+                    deletions=1,
+                    changes=2,
+                    status="modified",
+                )
+            ],
+            repository_full_name="org/repo2",
+            html_url="https://github.com/org/repo2/pull/23",
+        )
+
+        # Test file comparison directly
+        file_score = comparator._compare_file_changes(
+            pr1.files_changed, pr2.files_changed
+        )
+        assert file_score == 0.5, (
+            f"Expected 0.5 for different workflow files, got {file_score}"
+        )
+
+        # Test overall comparison - should be similar despite different workflow filenames
+        result = comparator.compare_pull_requests(pr1, pr2, only_automation=True)
+        assert result.is_similar
+        assert result.confidence_score >= 0.8
+        assert any("Similar titles" in reason for reason in result.reasons)
+
+        # Test with non-workflow files - should still get 0.0
+        pr3 = PullRequestInfo(
+            number=24,
+            title="Chore: Bump some-package from 1.0.0 to 1.1.0",
+            body="Bumps some-package from 1.0.0 to 1.1.0.",
+            author="dependabot[bot]",
+            head_sha="ghi789",
+            base_branch="main",
+            head_branch="dependabot/npm_and_yarn/some-package-1.1.0",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[
+                FileChange(
+                    filename="package.json",
+                    additions=1,
+                    deletions=1,
+                    changes=2,
+                    status="modified",
+                )
+            ],
+            repository_full_name="org/repo3",
+            html_url="https://github.com/org/repo3/pull/24",
+        )
+
+        pr4 = PullRequestInfo(
+            number=25,
+            title="Chore: Bump some-package from 1.0.0 to 1.1.0",
+            body="Bumps some-package from 1.0.0 to 1.1.0.",
+            author="dependabot[bot]",
+            head_sha="jkl012",
+            base_branch="main",
+            head_branch="dependabot/npm_and_yarn/some-package-1.1.0",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[
+                FileChange(
+                    filename="requirements.txt",
+                    additions=1,
+                    deletions=1,
+                    changes=2,
+                    status="modified",
+                )
+            ],
+            repository_full_name="org/repo4",
+            html_url="https://github.com/org/repo4/pull/25",
+        )
+
+        # Non-workflow files with different names should still get 0.0
+        non_workflow_score = comparator._compare_file_changes(
+            pr3.files_changed, pr4.files_changed
+        )
+        assert non_workflow_score == 0.0, (
+            f"Expected 0.0 for different non-workflow files, got {non_workflow_score}"
+        )
+
+    def test_author_normalization_bot_names(self):
+        """Test that author normalization handles bot name differences between REST and GraphQL APIs."""
+        comparator = PRComparator(0.8)
+
+        # Create PR with REST API style author (dependabot[bot])
+        pr1 = PullRequestInfo(
+            number=15,
+            title="Chore: Bump amannn/action-semantic-pull-request from 6.0.1 to 6.1.1",
+            body="Bumps [amannn/action-semantic-pull-request] from 6.0.1 to 6.1.1.",
+            author="dependabot[bot]",  # REST API format
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="dependabot/github_actions/amannn/action-semantic-pull-request-6.1.1",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[
+                FileChange(
+                    filename=".github/workflows/semantic-pull-request.yaml",
+                    additions=1,
+                    deletions=1,
+                    changes=2,
+                    status="modified",
+                )
+            ],
+            repository_full_name="org/repo1",
+            html_url="https://github.com/org/repo1/pull/15",
+        )
+
+        # Create PR with GraphQL API style author (dependabot)
+        pr2 = PullRequestInfo(
+            number=18,
+            title="Chore: Bump amannn/action-semantic-pull-request from 6.0.1 to 6.1.1",
+            body="Bumps [amannn/action-semantic-pull-request] from 6.0.1 to 6.1.1.",
+            author="dependabot",  # GraphQL API format (no [bot] suffix)
+            head_sha="def456",
+            base_branch="main",
+            head_branch="dependabot/github_actions/amannn/action-semantic-pull-request-6.1.1",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[
+                FileChange(
+                    filename=".github/workflows/semantic-pull-request.yaml",
+                    additions=1,
+                    deletions=1,
+                    changes=2,
+                    status="modified",
+                )
+            ],
+            repository_full_name="org/repo2",
+            html_url="https://github.com/org/repo2/pull/18",
+        )
+
+        # Test that normalization makes them equivalent
+        normalized1 = comparator._normalize_author(pr1.author)
+        normalized2 = comparator._normalize_author(pr2.author)
+        assert normalized1 == normalized2, (
+            f"Expected normalized authors to match: '{normalized1}' vs '{normalized2}'"
+        )
+        assert normalized1 == "dependabot", (
+            f"Expected normalized author to be 'dependabot', got '{normalized1}'"
+        )
+
+        # Test that the overall comparison considers them as same author
+        result = comparator.compare_pull_requests(pr1, pr2, only_automation=True)
+        assert result.is_similar
+        assert result.confidence_score >= 0.8
+        assert "Same automation author" in result.reasons
+
+        # Test with other bot types
+        test_cases = [
+            ("pre-commit-ci[bot]", "pre-commit-ci"),
+            ("renovate[bot]", "renovate"),
+            ("github-actions[bot]", "github-actions"),
+        ]
+
+        for bot_with_suffix, bot_without_suffix in test_cases:
+            norm_with = comparator._normalize_author(bot_with_suffix)
+            norm_without = comparator._normalize_author(bot_without_suffix)
+            assert norm_with == norm_without, (
+                f"Bot normalization failed for {bot_with_suffix} vs {bot_without_suffix}"
+            )
+            assert norm_with == bot_without_suffix.lower(), (
+                f"Expected normalized to be '{bot_without_suffix.lower()}', got '{norm_with}'"
+            )

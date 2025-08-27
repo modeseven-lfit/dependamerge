@@ -46,12 +46,14 @@ class GitHubService:
         progress_tracker: Optional[Any] = None,
         max_repo_tasks: int = 8,
         max_page_tasks: int = 16,
+        debug_matching: bool = False,
     ) -> None:
         """
         Args:
             token: GitHub token; if None, reads from env GITHUB_TOKEN.
             progress_tracker: Optional ProgressTracker-compatible instance.
             max_repo_tasks: Max concurrent repository scans to schedule at once.
+            debug_matching: Enable detailed debugging output for PR matching.
         """
         self._api = GitHubAsync(
             token=token,
@@ -66,6 +68,7 @@ class GitHubService:
         self._page_semaphore = asyncio.Semaphore(self._max_page_tasks)
         # Rate limit awareness
         self._rate_limited = False
+        self._debug_matching = debug_matching
 
     async def close(self) -> None:
         await self._api.aclose()
@@ -528,6 +531,52 @@ class GitHubService:
                     self._progress.analyze_pr(target_pr.number, repo_full_name)
 
                 comparison: ComparisonResult = comparator.compare_pull_requests(source_pr, target_pr, only_automation)
+
+                # Debug matching output
+                if self._debug_matching:
+                    from rich.console import Console
+                    debug_console = Console()
+                    debug_console.print(f"\n🔍 [bold]Comparing {repo_full_name}#{target_pr.number}[/bold]")
+                    debug_console.print(f"   Title: {target_pr.title}")
+                    debug_console.print(f"   Author: {target_pr.author}")
+
+                    # Show individual scores
+                    title_score = comparator._compare_titles(source_pr.title, target_pr.title)
+                    body_score = comparator._compare_bodies(source_pr.body, target_pr.body)
+                    files_score = comparator._compare_file_changes(source_pr.files_changed, target_pr.files_changed)
+                    author_score = (
+                        1.0
+                        if comparator._normalize_author(source_pr.author)
+                        == comparator._normalize_author(target_pr.author)
+                        else 0.0
+                    )
+
+                    debug_console.print(f"   📝 Title score: {title_score:.3f}")
+                    debug_console.print(f"   📄 Body score: {body_score:.3f}")
+                    debug_console.print(f"   📁 Files score: {files_score:.3f}")
+                    debug_console.print(f"   👤 Author score: {author_score:.3f}")
+                    debug_console.print(f"   🎯 Overall: {comparison.confidence_score:.3f} (threshold: 0.8)")
+
+                    if comparison.is_similar:
+                        debug_console.print(f"   ✅ [green]SIMILAR[/green] - {', '.join(comparison.reasons)}")
+                    else:
+                        debug_console.print(f"   ❌ [red]NOT SIMILAR[/red]")
+
+                        # Show why it failed
+                        if title_score == 0:
+                            source_pkg = comparator._extract_package_name(source_pr.title)
+                            target_pkg = comparator._extract_package_name(target_pr.title)
+                            debug_console.print(f"      📦 Source package: '{source_pkg}'")
+                            debug_console.print(f"      📦 Target package: '{target_pkg}'")
+
+                        if body_score < 0.6:
+                            if target_pr.body is None:
+                                debug_console.print(f"      ⚠️  Target PR has no body")
+                            elif source_pr.body is None:
+                                debug_console.print(f"      ⚠️  Source PR has no body")
+                            else:
+                                debug_console.print(f"      📄 Body comparison failed (score: {body_score:.3f})")
+
                 if comparison.is_similar:
                     matching_prs_in_repo.append((target_pr, comparison))
                     if self._progress:

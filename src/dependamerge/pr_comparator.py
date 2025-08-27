@@ -56,8 +56,10 @@ class PRComparator:
         if files_score > 0.6:
             reasons.append(f"Similar file changes (score: {files_score:.2f})")
 
-        # Compare authors
-        if source_pr.author == target_pr.author:
+        # Compare authors (normalize bot names to handle API differences)
+        source_author = self._normalize_author(source_pr.author)
+        target_author = self._normalize_author(target_pr.author)
+        if source_author == target_author:
             scores.append(1.0)
             reasons.append("Same automation author")
         else:
@@ -129,6 +131,15 @@ class PRComparator:
         # Calculate Jaccard similarity
         intersection = len(filenames1.intersection(filenames2))
         union = len(filenames1.union(filenames2))
+
+        # For GitHub Actions workflows, consider them similar if both modify workflow files
+        # This handles cases where different repos have different workflow names
+        workflows1 = {f for f in filenames1 if f.startswith('.github/workflows/')}
+        workflows2 = {f for f in filenames2 if f.startswith('.github/workflows/')}
+
+        if workflows1 and workflows2:
+            # Both PRs modify GitHub Actions workflows - consider this a partial match
+            return max(intersection / union if union > 0 else 0.0, 0.5)
 
         return intersection / union if union > 0 else 0.0
 
@@ -283,6 +294,22 @@ class PRComparator:
             return bump_match.group(1).strip()
 
         return ""
+
+    def _normalize_author(self, author: Optional[str]) -> str:
+        """Normalize author name to handle differences between REST and GraphQL APIs.
+
+        GitHub's REST API returns 'dependabot[bot]' while GraphQL returns 'dependabot'.
+        This method normalizes both to the same format for comparison.
+        """
+        if not author:
+            return ""
+
+        # Remove [bot] suffix if present to normalize bot names
+        normalized = author.lower()
+        if normalized.endswith("[bot]"):
+            normalized = normalized[:-5]  # Remove "[bot]"
+
+        return normalized
 
     def _is_precommit_body(self, body: Optional[str]) -> bool:
         """Check if body contains pre-commit specific patterns."""
