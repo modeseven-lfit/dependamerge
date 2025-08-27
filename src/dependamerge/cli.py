@@ -112,6 +112,9 @@ def merge(
     show_progress: bool = typer.Option(
         True, "--progress/--no-progress", help="Show real-time progress updates"
     ),
+    debug_matching: bool = typer.Option(
+        False, "--debug-matching", help="Show detailed scoring information for PR matching"
+    ),
 ):
     """
     Merge automation pull requests across an organization.
@@ -175,6 +178,19 @@ def merge(
 
         # Display source PR info
         _display_pr_info(source_pr, "Source PR", github_client, progress_tracker=progress_tracker)
+
+        # Debug matching info for source PR
+        if debug_matching:
+            console.print(f"\n🔍 [bold]Debug Matching Information[/bold]")
+            console.print(f"   Source PR automation status: {github_client.is_automation_author(source_pr.author)}")
+            console.print(f"   Extracted package: '{comparator._extract_package_name(source_pr.title)}'")
+            console.print(f"   Similarity threshold: {similarity_threshold}")
+            if source_pr.body:
+                console.print(f"   Body preview: {source_pr.body[:100]}...")
+                console.print(f"   Is dependabot body: {comparator._is_dependabot_body(source_pr.body)}")
+            else:
+                console.print(f"   ⚠️  Source PR has no body")
+            console.print()
 
         # Check if source PR is from automation or has valid override
         if not github_client.is_automation_author(source_pr.author):
@@ -260,7 +276,7 @@ def merge(
             progress_tracker.update_operation("Listing repositories...")
 
         async def _find_similar():
-            svc = GitHubService(token=token, progress_tracker=progress_tracker)
+            svc = GitHubService(token=token, progress_tracker=progress_tracker, debug_matching=debug_matching)
             try:
                 only_automation = github_client.is_automation_author(source_pr.author)
                 return await svc.find_similar_prs(
