@@ -23,6 +23,7 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+src/dependamerge/_version.py
 .Python
 .pdm-python
 .pdm-build

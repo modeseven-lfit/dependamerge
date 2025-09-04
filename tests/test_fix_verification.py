@@ -14,11 +14,11 @@ from dependamerge.models import PullRequestInfo
 
 def test_final_verification():
     """Final test to demonstrate the fix is working"""
-    with patch("dependamerge.cli.GitHubClient") as mock_client_class, patch(
-        "dependamerge.cli.PRComparator"
-    ) as mock_comparator_class, patch(
-        "dependamerge.github_service.GitHubService"
-    ) as mock_service_class:
+    with (
+        patch("dependamerge.cli.GitHubClient") as mock_client_class,
+        patch("dependamerge.cli.PRComparator") as mock_comparator_class,
+        patch("dependamerge.github_service.GitHubService") as mock_service_class,
+    ):
         # Setup mocks
         mock_client = Mock()
         mock_client_class.return_value = mock_client

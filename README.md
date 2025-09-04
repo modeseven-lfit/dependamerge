@@ -69,16 +69,95 @@ unmergeable PRs that need attention.
 - Bot-generated pull requests
 - Coordinated changes across repositories
 
-## Installation
+## Installation (uv + hatch)
+
+This project now uses:
+
+- hatchling + hatch-vcs for dynamic (tag-based) versioning
+- uv for environment + dependency management (produces/consumes `uv.lock`)
+
+### Quick Start (Run Without Cloning)
+
+Use `uvx` to run the latest published version directly from PyPI
+(no virtualenv management needed):
 
 ```bash
-# Install from source
+# Show help (latest release)
+uvx dependamerge --help
+
+# Run a specific tagged release
+uvx dependamerge==0.1.0 https://github.com/owner/repo/pull/123
+```
+
+### Local Development Install
+
+```bash
+# 1. Install uv (if not already installed)
+# macOS/Linux (script):
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# or with pipx:
+pipx install uv
+
+# 2. Clone the repository
 git clone <repository-url>
 cd dependamerge
-pip install -e .
 
-# Or install dependencies directly
-pip install typer requests PyGithub rich pydantic
+# 3. Create & activate a virtual environment (optional but recommended)
+uv venv .venv
+source .venv/bin/activate  # (On Windows: .venv\Scripts\activate)
+
+# 4. Install project + dev dependencies (uses dependency group 'dev')
+uv sync --group dev
+```
+
+The first sync will generate `uv.lock`. Commit that file to ensure reproducible builds.
+
+### Editable Workflow
+
+`uv sync` installs the project in editable (PEP 660) mode automatically.
+After making changes you can run:
+
+```bash
+uv run dependamerge --help
+```
+
+### Building & Publishing
+
+Dynamic version comes from Git tags (e.g. tag `v0.2.0` → version `0.2.0`):
+
+```bash
+# Build wheel + sdist
+uv build
+
+# (Optional) Inspect dist/
+ls dist/
+
+# Publish to PyPI (ensure you have credentials configured)
+uv publish
+```
+
+If you build before tagging, a local scheme like `0.0.0+local`
+(or similar) may appear—tag first for clean releases.
+
+### Updating / Adding Dependencies
+
+Edit `pyproject.toml` and then:
+
+```bash
+uv sync
+```
+
+To add a dev dependency:
+
+```bash
+uv add --group dev pytest-cov
+```
+
+### Running a One-Off Version (Isolation)
+
+```bash
+# Run a specific version in an ephemeral environment
+uvx dependamerge==0.1.0 --help
 ```
 
 ## Authentication
@@ -323,29 +402,44 @@ without worrying about the specific tab you're viewing.
 
 ### Setup Development Environment
 
+(If you already followed the Installation section, you can skip these repeated steps.)
+
 ```bash
 git clone <repository-url>
 cd dependamerge
-pip install -e ".[dev]"
+uv venv .venv
+source .venv/bin/activate
+uv sync --group dev
 ```
+
+The `dev` dependency group mirrors the legacy `.[dev]` extra.
 
 ### Running Tests
 
 ```bash
-pytest
+uv run pytest
+```
+
+You can pass args as usual:
+
+```bash
+uv run pytest -k "similarity and not slow" -vv
 ```
 
 ### Code Quality
 
 ```bash
-# Format code
-black src tests
+# Format (Black)
+uv run black src tests
 
-# Lint code
-flake8 src tests
+# Lint (Flake8 – still present)
+uv run flake8 src tests
 
 # Type checking
-mypy src
+uv run mypy src
+
+# (Optional) Ruff (if/when added)
+# uv run ruff check .
 ```
 
 ## Contributing
@@ -358,7 +452,7 @@ mypy src
 
 ## License
 
-MIT License - see LICENSE file for details.
+Apache-2.0 License - see LICENSE file for details.
 
 ## Troubleshooting
 
@@ -394,12 +488,10 @@ Solution: Ensure your token has `read:org` scope.
 
 ### Getting Help
 
-- Check the command help: `dependamerge --help`
-- Get specific command help:
-    `dependamerge blocked --help` or `dependamerge merge --help`
+- Check the command help (local dev): `uv run dependamerge --help`
+- For PyPI usage: `uvx dependamerge --help`
 - Enable verbose output with environment variables
-- Review the similarity scoring in dry-run mode for merge operations
-- Use JSON output format for programmatic processing of blocked PR results
+- Review similarity scoring in dry-run mode (`--dry-run`)
 
 ## Security Considerations
 
