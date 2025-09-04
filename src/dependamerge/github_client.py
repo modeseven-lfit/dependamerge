@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 
 
-
 from .models import (
     FileChange,
     OrganizationScanResult,
@@ -29,7 +28,6 @@ class GitHubClient:
             raise ValueError(
                 "GitHub token is required. Set GITHUB_TOKEN environment variable."
             )
-
 
     def parse_pr_url(self, url: str) -> tuple[str, str, int]:
         """Parse GitHub PR URL to extract owner, repo, and PR number."""
@@ -345,7 +343,3 @@ class GitHubClient:
                 scan_timestamp=scan_timestamp,
                 errors=[f"{e}"],
             )
-
-
-
-    # Legacy synchronous helper methods removed (status checks, review analysis, Copilot comment parsing).

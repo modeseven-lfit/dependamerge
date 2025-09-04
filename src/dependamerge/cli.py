@@ -4,18 +4,18 @@
 import hashlib
 import os
 import asyncio
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import requests
 import typer
 from typer.core import TyperGroup
-import click
+
 import urllib3.exceptions
 from rich.console import Console
 from rich.table import Table
 
 from .github_client import GitHubClient
-from .models import ComparisonResult, PullRequestInfo, UnmergeablePR
+from .models import PullRequestInfo
 from .pr_comparator import PRComparator
 from .progress_tracker import ProgressTracker, MergeProgressTracker
 from .resolve_conflicts import FixOrchestrator, FixOptions, PRSelection
@@ -181,7 +181,7 @@ def merge(
 
         # Debug matching info for source PR
         if debug_matching:
-            console.print(f"\n🔍 [bold]Debug Matching Information[/bold]")
+            console.print("\n🔍 [bold]Debug Matching Information[/bold]")
             console.print(f"   Source PR automation status: {github_client.is_automation_author(source_pr.author)}")
             console.print(f"   Extracted package: '{comparator._extract_package_name(source_pr.title)}'")
             console.print(f"   Similarity threshold: {similarity_threshold}")
@@ -189,7 +189,7 @@ def merge(
                 console.print(f"   Body preview: {source_pr.body[:100]}...")
                 console.print(f"   Is dependabot body: {comparator._is_dependabot_body(source_pr.body)}")
             else:
-                console.print(f"   ⚠️  Source PR has no body")
+                console.print("   ⚠️  Source PR has no body")
             console.print()
 
         # Check if source PR is from automation or has valid override
@@ -255,7 +255,7 @@ def merge(
         #     progress.update(task, description=f"Found {len(repositories)} repositories")
 
         # Find similar PRs
-        similar_prs: List[Tuple[PullRequestInfo, ComparisonResult]] = []
+        # similar_prs: List[Tuple[PullRequestInfo, ComparisonResult]] = []
 
         if progress_tracker:
             progress_tracker.update_operation("Listing repositories...")
@@ -324,7 +324,7 @@ def merge(
         console.print(f"\nMerging {len(all_similar_prs)} similar PRs...")
 
         merged_count = 0
-        for target_pr, comparison in all_similar_prs:
+        for target_pr, _comparison in all_similar_prs:
             repo_owner, repo_name = target_pr.repository_full_name.split("/")
 
             if fix:
@@ -668,7 +668,7 @@ def blocked(
                 console.print(f"✅ Fix complete: {success_count}/{len(selections)} succeeded")
             except Exception as e:
                 console.print(f"Error during fix workflow: {e}")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from e
 
     except Exception as e:
         # Ensure progress tracker is stopped even if check fails
