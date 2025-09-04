@@ -357,7 +357,6 @@ class MergeProgressTracker(ProgressTracker):
 
     def get_summary(self) -> Dict[str, Any]:
         """Get merge-specific summary."""
-        elapsed = datetime.now() - self.start_time
         summary = super().get_summary()
         summary.update({
             "similar_prs_found": self.similar_prs_found,

@@ -6,6 +6,33 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 
+class ReviewInfo(BaseModel):
+    """Represents a review on a pull request."""
+
+    id: str
+    user: str
+    state: str  # APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
+    submitted_at: str
+    body: Optional[str] = None
+
+
+class ReviewComment(BaseModel):
+    """Represents a review comment on a pull request."""
+
+    id: str
+    database_id: int
+    author: str
+    body: str
+    state: str
+    path: Optional[str] = None
+    position: Optional[int] = None
+    created_at: str
+    updated_at: str
+    pull_request_review_id: Optional[str] = None
+    pull_request_review_author: Optional[str] = None
+    pull_request_review_state: Optional[str] = None
+
+
 class FileChange(BaseModel):
     """Represents a file change in a pull request."""
 
@@ -33,6 +60,8 @@ class PullRequestInfo(BaseModel):
     files_changed: List[FileChange]
     repository_full_name: str
     html_url: str
+    reviews: List[ReviewInfo] = []  # PR reviews
+    review_comments: List[ReviewComment] = []  # Review comments (including Copilot)
 
     # Optional fields used by the interactive fix workflow
     # These enable cloning the correct repositories and pushing fixes.

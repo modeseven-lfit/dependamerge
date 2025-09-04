@@ -8,7 +8,6 @@ from typing import List, Optional
 
 import requests
 import typer
-from typer.core import TyperGroup
 
 import urllib3.exceptions
 from rich.console import Console
@@ -19,27 +18,12 @@ from .models import PullRequestInfo
 from .pr_comparator import PRComparator
 from .progress_tracker import ProgressTracker, MergeProgressTracker
 from .resolve_conflicts import FixOrchestrator, FixOptions, PRSelection
+from .merge_manager import AsyncMergeManager
 
 # Constants
 MAX_RETRIES = 2
 
-class DefaultCommandGroup(TyperGroup):
-    def __init__(self, *args, default="merge", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.default_command_name = default
-
-    def parse_args(self, ctx, args):
-        # If the first token isn't a known subcommand and isn't an option,
-        # treat it as arguments to the default command.
-        if args and not args[0].startswith("-"):
-            cmd = self.get_command(ctx, args[0])
-            if cmd is None and self.default_command_name:
-                args.insert(0, self.default_command_name)
-        return super().parse_args(ctx, args)
-
-
 app = typer.Typer(
-    cls=DefaultCommandGroup,
     help="Find blocked PRs in GitHub organizations and automatically merge pull requests"
 )
 console = Console(markup=False)
@@ -88,6 +72,42 @@ def _validate_override_sha(
     return provided_sha == expected_sha
 
 
+def _format_condensed_similarity(comparison) -> str:
+    """Format similarity comparison result in condensed format."""
+    reasons = comparison.reasons
+
+    # Check if same author is present
+    has_same_author = any("Same automation author" in reason for reason in reasons)
+
+    # Extract individual scores from reasons
+    score_parts = []
+    for reason in reasons:
+        if "Similar titles (score:" in reason:
+            score = reason.split("score: ")[1].replace(")", "")
+            score_parts.append(f"title {score}")
+        elif "Similar PR descriptions (score:" in reason:
+            score = reason.split("score: ")[1].replace(")", "")
+            score_parts.append(f"descriptions {score}")
+        elif "Similar file changes (score:" in reason:
+            score = reason.split("score: ")[1].replace(")", "")
+            score_parts.append(f"changes {score}")
+
+    # Build condensed format
+    if has_same_author:
+        author_text = "Same author; "
+    else:
+        author_text = ""
+
+    total_score = f"total score: {comparison.confidence_score:.2f}"
+
+    if score_parts:
+        breakdown = f" [{', '.join(score_parts)}]"
+    else:
+        breakdown = ""
+
+    return f"{author_text}{total_score}{breakdown}"
+
+
 @app.command()
 def merge(
     pr_url: str = typer.Argument(..., help="GitHub pull request URL"),
@@ -106,8 +126,8 @@ def merge(
     override: Optional[str] = typer.Option(
         None, "--override", help="SHA hash to override non-automation PR restriction"
     ),
-    fix: bool = typer.Option(
-        False, "--fix", help="Automatically fix out-of-date branches before merging"
+    no_fix: bool = typer.Option(
+        False, "--no-fix", help="Do not attempt to automatically fix out-of-date branches"
     ),
     show_progress: bool = typer.Option(
         True, "--progress/--no-progress", help="Show real-time progress updates"
@@ -115,22 +135,29 @@ def merge(
     debug_matching: bool = typer.Option(
         False, "--debug-matching", help="Show detailed scoring information for PR matching"
     ),
+    debug_merge: bool = typer.Option(
+        False, "--debug-merge", help="Show detailed merge requirement checking and diagnostics"
+    ),
+    dismiss_copilot: bool = typer.Option(
+        False, "--dismiss-copilot", help="Automatically dismiss unresolved GitHub Copilot review comments"
+    ),
 ):
     """
     Merge automation pull requests across an organization.
 
     This command will:
+
     1. Analyze the provided PR
+
     2. Find similar PRs in the organization
+
     3. Approve and merge matching PRs
 
-    For automation PRs (dependabot, pre-commit-ci, etc.):
-    - Merges similar PRs from the same automation tool
+    4. Automatically fix out-of-date branches (use --no-fix to disable)
 
-    For non-automation PRs:
-    - Requires --override flag with SHA hash
-    - Only merges PRs from the same author
-    - SHA is generated from author + commit message
+    Merges similar PRs from the same automation tool (dependabot, pre-commit.ci).
+
+    For user generated bulk PRs, use the --override flag with SHA hash.
     """
     # Initialize progress tracker
     progress_tracker = None
@@ -313,72 +340,68 @@ def merge(
         console.print(f"Found {len(all_similar_prs)} similar PRs:")
 
         for target_pr, comparison in all_similar_prs:
-            console.print(f"  • {target_pr.repository_full_name}#{target_pr.number}: {target_pr.title}")
-            console.print(f"    Similarity: {comparison.confidence_score:.2f} - {', '.join(comparison.reasons)}")
+            console.print(f"  • {target_pr.repository_full_name} #{target_pr.number}")
+            console.print(f"    {_format_condensed_similarity(comparison)}")
 
         if dry_run:
-            console.print("\n🔍 Dry run mode - no changes will be made")
-            return
+            console.print("\n🔍 Dependamerge Evaluation\n")
 
-        # Merge similar PRs
-        console.print(f"\nMerging {len(all_similar_prs)} similar PRs...")
+        # Merge PRs in parallel using async merge manager
+        async def _merge_parallel():
+            # Add source PR to the list for parallel processing
+            all_prs_to_merge = all_similar_prs + [(source_pr, None)]
 
-        merged_count = 0
-        for target_pr, _comparison in all_similar_prs:
-            repo_owner, repo_name = target_pr.repository_full_name.split("/")
+            async with AsyncMergeManager(
+                token=token,
+                merge_method=merge_method,
+                max_retries=MAX_RETRIES,
+                concurrency=10,  # Process up to 10 PRs concurrently
+                fix_out_of_date=not no_fix,  # Fix is default, --no-fix disables it
+                progress_tracker=progress_tracker,
+                dry_run=dry_run,
+                debug_merge=debug_merge,
+                dismiss_copilot=dismiss_copilot
+            ) as merge_manager:
 
-            if fix:
-                # Try to fix out-of-date PRs
-                if target_pr.mergeable_state == "behind":
-                    console.print(f"🔧 Fixing out-of-date PR {target_pr.repository_full_name}#{target_pr.number}")
-                    github_client.fix_out_of_date_pr(repo_owner, repo_name, target_pr.number)
+                if dry_run:
+                    pass  # No merge message in dry-run mode
+                else:
+                    console.print(f"\n🚀 Merging {len(all_prs_to_merge)} pull requests...")
+                results = await merge_manager.merge_prs_parallel(all_prs_to_merge)
+                return results
 
-            success = _merge_single_pr(
-                target_pr,
-                github_client,
-                merge_method,
-                console
-            )
+        # Run the parallel merge process
+        merge_results = asyncio.run(_merge_parallel())
 
-            if success:
-                merged_count += 1
-                if progress_tracker:
-                    progress_tracker.merge_success()
+        # Display results
+        if merge_results:
+            # Create a simple summary from results
+            merged_count = sum(1 for r in merge_results if r.status.value == "merged")
+            failed_count = sum(1 for r in merge_results if r.status.value == "failed")
+            skipped_count = sum(1 for r in merge_results if r.status.value == "skipped")
+            blocked_count = sum(1 for r in merge_results if r.status.value == "blocked")
+            total_to_merge = len(merge_results)
+            if dry_run:
+                console.print(f"\n▶️ Mergeable {merged_count}/{total_to_merge} PRs")
             else:
-                if progress_tracker:
-                    progress_tracker.merge_failure()
+                console.print(f"\n✅ Successfully merged {merged_count}/{total_to_merge} PRs")
 
-        # Finally merge the source PR
-        source_repo_owner, source_repo_name = source_pr.repository_full_name.split("/")
+            if failed_count > 0:
+                if dry_run:
+                    console.print(f"❌ Would fail to merge {failed_count} PRs")
+                else:
+                    console.print(f"❌ Failed to merge {failed_count} PRs")
+            if skipped_count > 0:
+                console.print(f"⏭️  Skipped {skipped_count} PRs")
+            if blocked_count > 0:
+                console.print(f"🛑 Blocked {blocked_count} PRs")
 
-        if fix and source_pr.mergeable_state == "behind":
-            console.print(f"🔧 Fixing out-of-date source PR {source_pr.repository_full_name}#{source_pr.number}")
-            github_client.fix_out_of_date_pr(source_repo_owner, source_repo_name, source_pr.number)
+            if not dry_run:
+                console.print(f"📈 Final Results: {merged_count} merged, {failed_count} failed")
 
-        console.print(f"\nMerging source PR #{source_pr.number} in {source_pr.repository_full_name}...")
-        source_success = _merge_single_pr(
-            source_pr,
-            github_client,
-            merge_method,
-            console
-        )
 
-        if source_success:
-            merged_count += 1
-            if progress_tracker:
-                progress_tracker.merge_success()
         else:
-            if progress_tracker:
-                progress_tracker.merge_failure()
-
-        total_to_merge = len(all_similar_prs) + 1
-        console.print(f"\n✅ Successfully merged {merged_count}/{total_to_merge} PRs")
-
-        if progress_tracker:
-            final_summary = progress_tracker.get_summary()
-            prs_merged = final_summary.get('prs_merged', 0)
-            merge_failures = final_summary.get('merge_failures', 0)
-            console.print(f"📈 Final Results: {prs_merged} merged, {merge_failures} failed")
+            console.print("❌ No PRs were processed")
 
     except Exception as e:
         # Ensure progress tracker is stopped even if merge fails

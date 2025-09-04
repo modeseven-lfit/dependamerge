@@ -221,9 +221,14 @@ def merge(
             success_count += 1
 
         total_prs = len(similar_prs) + 1  # similar PRs + source PR
-        console.print(
-            f"\nSuccessfully merged {success_count}/{total_prs} PRs (including source PR)"
-        )
+        if dry_run:
+            console.print(
+                f"\n▶️ Can potentially merge {success_count}/{total_prs} PRs (including source PR)"
+            )
+        else:
+            console.print(
+                f"\nSuccessfully merged {success_count}/{total_prs} PRs (including source PR)"
+            )
 
     except Exception as e:
         console.print(f"Error: {e}")

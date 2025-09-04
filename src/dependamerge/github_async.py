@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, Union, AsyncIterator
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union, AsyncIterator
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -373,7 +373,7 @@ class GitHubAsync:
     # Public helpers
     # -------------
 
-    async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         r = await self._request("GET", f"{self.api_url}{path}", params=params)
         return r.json()  # type: ignore[no-any-return]
 
@@ -444,16 +444,87 @@ class GitHubAsync:
 
         REST: PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge
         """
-        data = await self.put(
-            f"/repos/{owner}/{repo}/pulls/{number}/merge",
-            json={"merge_method": merge_method},
-        )
-        # The API returns {"merged": true/false, ...}
-        return bool(data.get("merged", False))
+        try:
+            data = await self.put(
+                f"/repos/{owner}/{repo}/pulls/{number}/merge",
+                json={"merge_method": merge_method},
+            )
+            # The API returns {"merged": true/false, ...}
+            return bool(data.get("merged", False))
+        except Exception as e:
+            # Get PR details to provide better diagnostics for merge failures
+            try:
+                pr_data_response = await self.get(f"/repos/{owner}/{repo}/pulls/{number}")
+                # PR data should always be a dict, not a list
+                pr_data = pr_data_response if isinstance(pr_data_response, dict) else {}
+
+                # Extract relevant state information
+                mergeable = pr_data.get("mergeable")
+                mergeable_state = pr_data.get("mergeable_state")
+                state = pr_data.get("state")
+                draft = pr_data.get("draft", False)
+
+                # Enhanced error message with PR state context
+                error_msg = (
+                    f"Failed to merge PR #{number} in {owner}/{repo}. "
+                    f"PR state: {state}, draft: {draft}, mergeable: {mergeable}, "
+                    f"mergeable_state: {mergeable_state}. "
+                    f"Original error: {str(e)}"
+                )
+
+                # Check for common issues that cause 405 errors
+                if mergeable_state == "blocked":
+                    error_msg += " (Likely blocked by branch protection rules or required status checks)"
+                elif mergeable_state == "behind":
+                    error_msg += " (PR branch is behind base branch)"
+                elif mergeable_state == "dirty":
+                    error_msg += " (PR has merge conflicts)"
+                elif draft:
+                    error_msg += " (Cannot merge draft PR)"
+                elif state != "open":
+                    error_msg += " (PR is not open)"
+
+                raise Exception(error_msg) from e
+            except Exception as inner_e:
+                # If we can't get PR details, just re-raise the original error
+                if isinstance(inner_e, Exception) and "Failed to merge PR" in str(inner_e):
+                    raise inner_e from e
+                else:
+                    raise e from inner_e
+
+    async def get_pull_request_review_comments(self, owner: str, repo: str, number: int) -> List[Dict[str, Any]]:
+        """
+        Get review comments for a pull request.
+
+        REST: GET /repos/{owner}/{repo}/pulls/{pull_number}/comments
+        """
+        try:
+            data = await self.get(f"/repos/{owner}/{repo}/pulls/{number}/comments")
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            # If we can't get review comments, return empty list
+            self.log.debug(f"Could not fetch review comments for PR {number}: {e}")
+            return []
+
+    async def get_branch_protection(self, owner: str, repo: str, branch: str) -> Dict[str, Any]:
+        """
+        Get branch protection rules for a branch.
+
+        REST: GET /repos/{owner}/{repo}/branches/{branch}/protection
+        """
+        try:
+            protection_data = await self.get(f"/repos/{owner}/{repo}/branches/{branch}/protection")
+            # Branch protection data should always be a dict, not a list
+            return protection_data if isinstance(protection_data, dict) else {}
+        except Exception as e:
+            # Branch protection might not be enabled, return empty dict
+            if "404" in str(e):
+                return {}
+            raise
 
     async def update_branch(self, owner: str, repo: str, number: int) -> None:
         """
-        Update a PR branch with the base branch.
+        Update a pull request branch.
 
         REST: PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch
         """

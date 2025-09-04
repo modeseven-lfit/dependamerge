@@ -14,6 +14,7 @@ from .models import (
     FileChange,
     OrganizationScanResult,
     PullRequestInfo,
+    ReviewInfo,
     UnmergeablePR,
     UnmergeableReason,
     ComparisonResult,
@@ -427,6 +428,8 @@ class GitHubService:
         Convert a PR GraphQL node to PullRequestInfo (for merge workflows).
         """
         files = self._extract_file_changes(pr)
+        reviews = self._extract_reviews(pr)
+
         return PullRequestInfo(
             number=int(pr.get("number", 0)),
             title=pr.get("title") or "",
@@ -442,6 +445,7 @@ class GitHubService:
             files_changed=files,
             repository_full_name=repo_full_name,
             html_url=pr.get("url") or "",
+            reviews=reviews,
         )
 
     async def find_similar_prs(
@@ -632,6 +636,26 @@ class GitHubService:
                 )
             )
         return result
+
+    def _extract_reviews(self, pr: Dict[str, Any]) -> List[ReviewInfo]:
+        """Extract PR reviews from GraphQL node."""
+        reviews = (pr.get("reviews") or {}).get("nodes", []) or []
+        result: List[ReviewInfo] = []
+
+        for review in reviews:
+            author = (review.get("author") or {}).get("login") or "unknown"
+            result.append(
+                ReviewInfo(
+                    id=review.get("id") or "",
+                    user=author,
+                    state=review.get("state") or "",
+                    submitted_at=review.get("createdAt") or "",
+                    body=review.get("body"),
+                )
+            )
+        return result
+
+
 
     def _extract_copilot_comments(self, pr: Dict[str, Any]) -> List[CopilotComment]:
         comments = (pr.get("comments") or {}).get("nodes", []) or []

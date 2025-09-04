@@ -23,7 +23,8 @@ This saves time on routine dependency updates, maintenance tasks, and
 coordinated changes across all repositories while providing visibility into
 unmergeable PRs that need attention.
 
-**Works with any pull request** regardless of author, automation tool, or origin.
+**Works with any pull request** regardless of author, automation tool, or
+origin.
 
 ## Features
 
@@ -48,15 +49,18 @@ unmergeable PRs that need attention.
   or automation tool
 - **Smart Matching**: Uses content similarity algorithms to match related PRs
   across repositories
-- **Bulk Operations**: Approve and merge related similar PRs with a single command
+- **Bulk Operations**: Approve and merge related similar PRs with a single
+  command
 - **Security Features**: SHA-based authentication for non-automation PRs
   ensures authorized bulk merges
 - **Dry Run Mode**: Preview what changes will apply without modifications
 
 ### General Features
 
-- **Rich CLI Output**: Beautiful terminal output with progress indicators and tables
-- **Real-time Progress**: Live progress updates for both checking and merge operations
+- **Rich CLI Output**: Beautiful terminal output with progress indicators and
+  tables
+- **Real-time Progress**: Live progress updates for both checking and merge
+  operations
 - **Output Formats**: Support for table and JSON output formats
 - **Error Handling**: Graceful handling of API rate limits and repository
   access issues
@@ -86,7 +90,7 @@ Use `uvx` to run the latest published version directly from PyPI
 uvx dependamerge --help
 
 # Run a specific tagged release
-uvx dependamerge==0.1.0 https://github.com/owner/repo/pull/123
+uvx dependamerge==0.1.0 merge https://github.com/owner/repo/pull/123
 ```
 
 ### Local Development Install
@@ -110,7 +114,8 @@ source .venv/bin/activate  # (On Windows: .venv\Scripts\activate)
 uv sync --group dev
 ```
 
-The first sync will generate `uv.lock`. Commit that file to ensure reproducible builds.
+The first sync will generate `uv.lock`. Commit that file to ensure reproducible
+builds.
 
 ### Editable Workflow
 
@@ -162,13 +167,79 @@ uvx dependamerge==0.1.0 --help
 
 ## Authentication
 
-You need a GitHub personal access token with appropriate permissions:
+You need a GitHub personal access token with appropriate permissions. The tool
+performs both read and write operations on GitHub repositories and pull
+requests.
 
-1. Go to GitHub Settings → Developer settings → Personal access tokens
-2. Create a token with these scopes:
-   - `repo` (for private repositories)
-   - `public_repo` (for public repositories)
-   - `read:org` (to list organization repositories)
+### Classic Personal Access Tokens (Legacy)
+
+For classic tokens (Settings → Developer settings → Personal access tokens →
+Tokens (classic)):
+
+**Required Scopes:**
+
+- `repo` - Full control of private repositories (includes all repository
+  permissions)
+  - **OR** `public_repo` - Access to public repositories (if working with
+    public repos)
+- `read:org` - Read organization membership, teams, and repositories
+- `workflow` - Update GitHub Actions workflows (needed for some PR status
+  checks)
+
+**What the tool does with these permissions:**
+
+- **Read Operations**: Access PR details, file changes, reviews, commits, check
+  runs, and repository lists
+- **Write Operations**: Create PR reviews (approvals), merge pull requests,
+  update PR branches
+
+### Fine-grained Personal Access Tokens (Recommended)
+
+For fine-grained tokens (Settings → Developer settings → Personal access
+tokens → Fine-grained tokens):
+
+**Repository Access:**
+
+- **Organization**: Select the target organization to grant access to all its
+  repositories
+- **OR** **Selected repositories**: Choose all repositories you want to analyze
+  and merge PRs in
+
+**Required Repository Permissions:**
+
+- **Contents**: Read (access repository content and file changes)
+- **Metadata**: Read (access basic repository information)
+- **Pull requests**: Read and Write
+  - Read: View PR details, files, commits, reviews, status
+  - Write: Create reviews, merge PRs, update branches
+- **Actions**: Read (check GitHub Actions workflow status)
+- **Checks**: Read (check status of check runs and required status checks)
+
+**Optional Repository Permissions:**
+
+- **Administration**: Read (access merge requirements and branch protection
+  rules)
+
+**Important Notes for Branch Protection:**
+
+- If repositories have **branch protection rules** enabled, these
+  requirements may apply:
+  - **Required status checks**: All CI/CD workflows must pass before merging
+  - **Required reviews**: PRs may need approval from code owners or specific teams
+  - **Up-to-date branches**: PRs may need to be current with the base branch
+  - **Copilot review dismissal**: If using `--dismiss-copilot`, you may need
+    permissions to dismiss pull request reviews
+- **Fine-grained tokens** may need access to **all repositories**
+  in the organization, rather than selected ones, to handle organization-wide
+  operations effectively
+- For repositories with **strict branch protection**, the token owner may need
+  **admin permissions** on individual repositories to bypass certain rules
+
+**Organization Permissions (if using organization-wide access):**
+
+- **Members**: Read (list organization members for author verification)
+
+### Setting Up Authentication
 
 Set the token as an environment variable:
 
@@ -177,6 +248,19 @@ export GITHUB_TOKEN=your_token_here
 ```
 
 Or pass it directly to the command using `--token`.
+
+### Permission Verification
+
+To verify your token has the correct permissions:
+
+```bash
+# Test basic access
+curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
+
+# Test organization access
+curl -H "Authorization: token $GITHUB_TOKEN" \
+  https://api.github.com/orgs/YOUR_ORG/repos
+```
 
 ## Usage
 
@@ -208,7 +292,8 @@ The blocked command will:
 For any pull request from any author:
 
 ```bash
-dependamerge merge https://github.com/lfreleng-actions/python-project-name-action/pull/22
+dependamerge merge \
+  https://github.com/lfreleng-actions/python-project-name-action/pull/22
 ```
 
 ### Optional Security Validation
@@ -256,7 +341,8 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 
 - `--format TEXT`: Output format - table or json (default: table)
 
-- `--progress/--no-progress`: Show real-time progress updates (default: progress)
+- `--progress/--no-progress`: Show real-time progress updates (default:
+  progress)
 - `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
 
 #### Merge Command Options
@@ -264,9 +350,13 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 - `--dry-run`: Show what changes will apply without making them
 - `--threshold FLOAT`: Similarity threshold for matching PRs (0.0-1.0,
   default: 0.8)
-- `--merge-method TEXT`: Merge method - merge, squash, or rebase (default: merge)
+- `--merge-method TEXT`: Merge method - merge, squash, or rebase (default:
+  merge)
 - `--fix`: Automatically fix out-of-date branches before merging
-- `--progress/--no-progress`: Show real-time progress updates (default: progress)
+- `--dismiss-copilot`: Automatically dismiss unresolved GitHub Copilot review comments
+- `--debug-merge`: Show detailed merge checking and diagnostics
+- `--progress/--no-progress`: Show real-time progress updates (default:
+  progress)
 - `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
 - `--override TEXT`: SHA hash for extra security validation
 
@@ -274,18 +364,22 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 
 ### Pull Request Processing
 
-1. **Parse Source PR**: Analyzes the provided pull request URL and extracts metadata
-2. **Organization Check**: Lists all repositories in the same GitHub organization
+1. **Parse Source PR**: Analyzes the provided pull request URL and extracts
+   metadata
+2. **Organization Check**: Lists all repositories in the same GitHub
+   organization
 3. **PR Discovery**: Finds all open pull requests in each repository
 4. **Content Matching**: Compares PRs using different similarity metrics:
    - Title similarity (normalized to remove version numbers)
    - File change patterns
    - Author matching
-5. **Optional Validation**: If `--override` provided, validates SHA for extra security
+5. **Optional Validation**: If `--override` provided, validates SHA for extra
+   security
 6. **Approval & Merge**: For matching PRs above the threshold:
    - Adds an approval review
    - Merges the pull request
-7. **Source PR Merge**: Merges the original source PR that served as the baseline
+7. **Source PR Merge**: Merges the original source PR that served as the
+   baseline
 
 ## Similarity Matching
 
@@ -351,6 +445,19 @@ dependamerge merge https://github.com/myorg/repo1/pull/89 \
   --override f1a2b3c4d5e6f7g8
 ```
 
+#### Dismissing Copilot Comments
+
+```bash
+# Merge with automatic Copilot comment dismissal
+dependamerge merge https://github.com/myorg/repo1/pull/67 --dismiss-copilot
+
+# Dry run to see which Copilot comments the tool would dismiss
+dependamerge merge https://github.com/myorg/repo1/pull/67 --dismiss-copilot --dry-run
+
+# With detailed debugging for merge requirements and Copilot handling
+dependamerge merge https://github.com/myorg/repo1/pull/67 --dismiss-copilot --debug-merge
+```
+
 #### Dry Run with Fix Option
 
 ```bash
@@ -363,8 +470,10 @@ dependamerge merge https://github.com/myorg/repo1/pull/78 \
 
 ### For All PRs
 
-- **Mergeable Check**: Verifies PRs are in a mergeable state before attempting merge
-- **Auto-Fix**: Automatically update out-of-date branches when using `--fix` option
+- **Mergeable Check**: Verifies PRs are in a mergeable state before attempting
+  merge
+- **Auto-Fix**: Automatically update out-of-date branches when using `--fix`
+  option
 - **Detailed Status**: Shows specific reasons preventing PR merges (conflicts,
   blocked by checks, etc.)
 - **Similarity Threshold**: Configurable confidence threshold prevents incorrect
@@ -388,11 +497,11 @@ The tool now supports GitHub PR URLs with path segments:
 
 ```bash
 # These URL formats now work:
-dependamerge https://github.com/owner/repo/pull/123
-dependamerge https://github.com/owner/repo/pull/123/
-dependamerge https://github.com/owner/repo/pull/123/files
-dependamerge https://github.com/owner/repo/pull/123/commits
-dependamerge https://github.com/owner/repo/pull/123/files/diff
+dependamerge merge https://github.com/owner/repo/pull/123
+dependamerge merge https://github.com/owner/repo/pull/123/
+dependamerge merge https://github.com/owner/repo/pull/123/files
+dependamerge merge https://github.com/owner/repo/pull/123/commits
+dependamerge merge https://github.com/owner/repo/pull/123/files/diff
 ```
 
 This enhancement allows you to copy URLs directly from GitHub's PR pages
@@ -402,7 +511,8 @@ without worrying about the specific tab you're viewing.
 
 ### Setup Development Environment
 
-(If you already followed the Installation section, you can skip these repeated steps.)
+(If you already followed the Installation section, you can skip these repeated
+steps.)
 
 ```bash
 git clone <repository-url>
@@ -466,13 +576,38 @@ Error: GitHub token needed
 
 Solution: Set `GITHUB_TOKEN` environment variable or use `--token` flag.
 
-#### Permission Error
+### Permission Error
 
 ```text
 Failed to fetch organization repositories
 ```
 
-Solution: Ensure your token has `read:org` scope.
+Solution: Ensure your token has the required permissions:
+
+- Classic tokens: `read:org` scope
+- Fine-grained tokens: Organization access with "Members: Read" permission
+
+### Write Permission Error
+
+```text
+403 Forbidden during merge attempt
+```
+
+Solution: Ensure your token has write permissions:
+
+- Classic tokens: `repo` scope (or `public_repo` for public repositories)
+- Fine-grained tokens: "Pull requests: Write" permission on target repositories
+
+### Actions/Checks Access Error
+
+```text
+Failed to check PR status
+```
+
+Solution: Add workflow/actions permissions:
+
+- Classic tokens: `workflow` scope
+- Fine-grained tokens: "Actions: Read" and "Checks: Read" permissions
 
 #### No Similar PRs Found
 
@@ -496,7 +631,13 @@ Solution: Ensure your token has `read:org` scope.
 ## Security Considerations
 
 - Store GitHub tokens securely (environment variables, not in code)
-- Use tokens with minimal required permissions
+- Use tokens with minimal required permissions:
+  - For analysis: Use fine-grained tokens with read permissions
+  - For merging operations: Use the required write permissions
+- **Prefer fine-grained tokens** over classic tokens for better security
 - Rotate access tokens periodically
 - Review PR changes in dry-run mode first
 - Be cautious with low similarity thresholds
+- Consider using repository-specific tokens instead of organization-wide access
+  when possible
+- Audit token permissions and revoke unused tokens periodically

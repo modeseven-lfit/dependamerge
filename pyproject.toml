@@ -58,6 +58,7 @@ dev = [
     "black>=23.0.0",
     "flake8>=6.0.0",
     "mypy>=1.0.0",
+    "pyflakes>=3.4.0",
     "types-requests>=2.31.0",
 ]
 
@@ -93,6 +94,7 @@ dev = [
   "black>=23.0.0",
   "flake8>=6.0.0",
   "mypy>=1.0.0",
+  "pyflakes>=3.4.0",
   "types-requests>=2.31.0",
 ]
 

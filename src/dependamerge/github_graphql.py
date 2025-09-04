@@ -90,6 +90,17 @@ query($org: String!, $reposCursor: String) {
                 createdAt
               }
             }
+            reviews(first: 20, states: [PENDING, COMMENTED, APPROVED, CHANGES_REQUESTED]) {
+              nodes {
+                id
+                author { login }
+                state
+                body
+                createdAt
+                updatedAt
+              }
+            }
+
             commits(last: 1) {
               nodes {
                 commit {
@@ -166,6 +177,17 @@ query($owner: String!, $name: String!, $prsCursor: String, $prsPageSize: Int!, $
             createdAt
           }
         }
+        reviews(first: 20, states: [PENDING, COMMENTED, APPROVED, CHANGES_REQUESTED]) {
+          nodes {
+            id
+            author { login }
+            state
+            body
+            createdAt
+            updatedAt
+          }
+        }
+
         commits(last: 1) {
           nodes {
             commit {
@@ -191,6 +213,49 @@ query($owner: String!, $name: String!, $prsCursor: String, $prsPageSize: Int!, $
           }
         }
       }
+    }
+  }
+}
+"""
+
+# GraphQL mutations for managing review comments and reviews
+DISMISS_REVIEW_COMMENT = """
+mutation DismissReviewComment($commentId: ID!) {
+  dismissPullRequestReviewComment(input: {
+    pullRequestReviewCommentId: $commentId
+  }) {
+    pullRequestReviewComment {
+      id
+      state
+      author { login }
+    }
+  }
+}
+"""
+
+DISMISS_PULL_REQUEST_REVIEW = """
+mutation DismissPullRequestReview($reviewId: ID!, $message: String!) {
+  dismissPullRequestReview(input: {
+    pullRequestReviewId: $reviewId
+    message: $message
+  }) {
+    pullRequestReview {
+      id
+      state
+      author { login }
+    }
+  }
+}
+"""
+
+RESOLVE_REVIEW_THREAD = """
+mutation ResolveReviewThread($threadId: ID!) {
+  resolveReviewThread(input: {
+    threadId: $threadId
+  }) {
+    thread {
+      id
+      isResolved
     }
   }
 }
