@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -76,9 +76,10 @@ class TestGitHubClient:
 
     @patch("dependamerge.github_async.GitHubAsync")
     def test_get_pull_request_info(self, mock_async_class):
-        # Setup mocks
-        mock_async = Mock()
-        mock_async_class.return_value.__aenter__.return_value = mock_async
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
         # Mock PR data
         pr_data = {
@@ -104,16 +105,31 @@ class TestGitHubClient:
         }
 
         # Mock the async get method
-        async def mock_get(*args, **kwargs):
-            return pr_data
+        mock_async.get = AsyncMock(return_value=pr_data)
 
-        mock_async.get = mock_get
+        # Create proper async iterator mock
+        class MockAsyncIterator:
+            def __init__(self, data):
+                self.data = data
+                self.called_with = None
 
-        # Create an async iterator for get_paginated
-        async def async_iterator():
-            yield [file_data]
+            def __call__(self, *args, **kwargs):
+                self.called_with = (args, kwargs)
+                return self
 
-        mock_async.get_paginated.return_value = async_iterator()
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.data:
+                    result = self.data.pop(0)
+                    return result
+                raise StopAsyncIteration
+
+            def assert_called_once_with(self, *args, **kwargs):
+                assert self.called_with == (args, kwargs)
+
+        mock_async.get_paginated = MockAsyncIterator([[file_data]])
 
         client = GitHubClient(token="test_token")
         pr_info = client.get_pull_request_info("owner", "repo", 22)
@@ -124,6 +140,12 @@ class TestGitHubClient:
         assert pr_info.author == "dependabot[bot]"
         assert len(pr_info.files_changed) == 1
         assert pr_info.files_changed[0].filename == "requirements.txt"
+
+        # Verify async methods were called properly
+        mock_async.get.assert_called_once_with("/repos/owner/repo/pulls/22")
+        mock_async.get_paginated.assert_called_once_with(
+            "/repos/owner/repo/pulls/22/files", per_page=100
+        )
 
     def test_is_automation_author(self):
         client = GitHubClient(token="test_token")
@@ -136,8 +158,10 @@ class TestGitHubClient:
 
     @patch("dependamerge.github_async.GitHubAsync")
     def test_get_pull_request_commits(self, mock_async_class):
-        mock_async = Mock()
-        mock_async_class.return_value.__aenter__.return_value = mock_async
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
         # Mock commit data
         commit_data = [
@@ -149,11 +173,29 @@ class TestGitHubClient:
             {"commit": {"message": "Update tests"}},
         ]
 
-        # Create an async iterator for get_paginated
-        async def async_iterator():
-            yield commit_data
+        # Create proper async iterator mock
+        class MockAsyncIterator:
+            def __init__(self, data):
+                self.data = data
+                self.called_with = None
 
-        mock_async.get_paginated.return_value = async_iterator()
+            def __call__(self, *args, **kwargs):
+                self.called_with = (args, kwargs)
+                return self
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.data:
+                    result = self.data.pop(0)
+                    return result
+                raise StopAsyncIteration
+
+            def assert_called_once_with(self, *args, **kwargs):
+                assert self.called_with == (args, kwargs)
+
+        mock_async.get_paginated = MockAsyncIterator([commit_data])
 
         client = GitHubClient(token="test_token")
         commits = client.get_pull_request_commits("owner", "repo", 22)
@@ -162,19 +204,244 @@ class TestGitHubClient:
         assert commits[0] == "Fix bug in authentication\n\nDetailed description"
         assert commits[1] == "Update tests"
 
+        # Verify async method was called properly
+        mock_async.get_paginated.assert_called_once_with(
+            "/repos/owner/repo/pulls/22/commits", per_page=100
+        )
+
     @patch("dependamerge.github_async.GitHubAsync")
     def test_get_pull_request_commits_empty(self, mock_async_class):
-        mock_async = Mock()
-        mock_async_class.return_value.__aenter__.return_value = mock_async
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
-        # Create an async iterator for empty commits
-        async def async_iterator():
-            yield []
+        # Create proper async iterator mock for empty commits
+        class MockAsyncIterator:
+            def __init__(self, data):
+                self.data = data
 
-        mock_async.get_paginated.return_value = async_iterator()
+            def __call__(self, *args, **kwargs):
+                return self
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.data:
+                    result = self.data.pop(0)
+                    return result
+                raise StopAsyncIteration
+
+        mock_async.get_paginated = MockAsyncIterator([[]])
 
         client = GitHubClient(token="test_token")
         commits = client.get_pull_request_commits("owner", "repo", 22)
 
         assert len(commits) == 0
         assert commits == []
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_get_organization_repositories(self, mock_async_class):
+        """Test getting organization repositories using async client."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # Mock repository data
+        repo_data = [
+            {"full_name": "test-org/repo1"},
+            {"full_name": "test-org/repo2"},
+            {"full_name": "test-org/repo3"},
+        ]
+
+        # Create proper async iterator mock
+        class MockAsyncIterator:
+            def __init__(self, data):
+                self.data = data
+                self.called_with = None
+
+            def __call__(self, *args, **kwargs):
+                self.called_with = (args, kwargs)
+                return self
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.data:
+                    result = self.data.pop(0)
+                    return result
+                raise StopAsyncIteration
+
+            def assert_called_once_with(self, *args, **kwargs):
+                assert self.called_with == (args, kwargs)
+
+        mock_async.get_paginated = MockAsyncIterator([repo_data])
+
+        client = GitHubClient(token="test_token")
+        repos = client.get_organization_repositories("test-org")
+
+        assert len(repos) == 3
+        assert "test-org/repo1" in repos
+        assert "test-org/repo2" in repos
+        assert "test-org/repo3" in repos
+
+        # Verify async method was called properly
+        mock_async.get_paginated.assert_called_once_with(
+            "/orgs/test-org/repos", per_page=100
+        )
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_approve_pull_request(self, mock_async_class):
+        """Test pull request approval using async client."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_async.approve_pull_request = AsyncMock()
+
+        client = GitHubClient(token="test_token")
+        result = client.approve_pull_request("owner", "repo", 22, "LGTM")
+
+        assert result is True
+        mock_async.approve_pull_request.assert_called_once_with(
+            "owner", "repo", 22, "LGTM"
+        )
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_approve_pull_request_failure(self, mock_async_class):
+        """Test pull request approval failure handling."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_async.approve_pull_request = AsyncMock(side_effect=Exception("API Error"))
+
+        client = GitHubClient(token="test_token")
+        result = client.approve_pull_request("owner", "repo", 22)
+
+        assert result is False
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_merge_pull_request(self, mock_async_class):
+        """Test pull request merging using async client."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_async.merge_pull_request = AsyncMock(return_value=True)
+
+        client = GitHubClient(token="test_token")
+        result = client.merge_pull_request("owner", "repo", 22, "squash")
+
+        assert result is True
+        mock_async.merge_pull_request.assert_called_once_with(
+            "owner", "repo", 22, "squash"
+        )
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_merge_pull_request_failure(self, mock_async_class):
+        """Test pull request merging failure handling."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_async.merge_pull_request = AsyncMock(side_effect=Exception("API Error"))
+
+        client = GitHubClient(token="test_token")
+        result = client.merge_pull_request("owner", "repo", 22)
+
+        assert result is False
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_fix_out_of_date_pr(self, mock_async_class):
+        """Test fixing out of date PR using async client."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        mock_async.update_branch = AsyncMock()
+
+        client = GitHubClient(token="test_token")
+        result = client.fix_out_of_date_pr("owner", "repo", 22)
+
+        assert result is True
+        mock_async.update_branch.assert_called_once_with("owner", "repo", 22)
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_analyze_block_reason_failing_checks(self, mock_async_class):
+        """Test analyzing block reason with failing checks."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # Mock responses
+        mock_async.get = AsyncMock(
+            side_effect=[
+                [],  # reviews response (no approvals)
+                {  # check runs response
+                    "check_runs": [{"conclusion": "failure", "name": "CI Tests"}]
+                },
+            ]
+        )
+
+        client = GitHubClient(token="test_token")
+
+        # Create a mock PR info
+        pr_info = PullRequestInfo(
+            number=22,
+            title="Test PR",
+            body="Test body",
+            author="user",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="feature",
+            state="open",
+            mergeable=True,
+            mergeable_state="blocked",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+
+        reason = client._analyze_block_reason(pr_info)
+        assert "failing checks" in reason.lower()
+
+    def test_should_attempt_merge_logic(self):
+        """Test the _should_attempt_merge logic with different PR states."""
+        client = GitHubClient(token="test_token")
+
+        # Mock PR objects with different states
+        class MockPR:
+            def __init__(self, mergeable, mergeable_state):
+                self.mergeable = mergeable
+                self.mergeable_state = mergeable_state
+
+        # Test cases: (mergeable, mergeable_state, expected_result)
+        test_cases = [
+            (True, "clean", True),  # Ready to merge
+            (True, "blocked", True),  # Mergeable but blocked by protection
+            (True, "draft", False),  # Draft PR should not be merged
+            (False, "blocked", True),  # Might resolve after approval
+            (False, "dirty", False),  # Has conflicts, needs manual fix
+            (False, "behind", False),  # Behind base, needs update
+            (None, "clean", True),  # GitHub still calculating, but looks clean
+            (None, "blocked", True),  # GitHub still calculating, might work
+            (None, "dirty", False),  # GitHub still calculating, but dirty
+        ]
+
+        for mergeable, mergeable_state, expected in test_cases:
+            pr = MockPR(mergeable, mergeable_state)
+            result = client._should_attempt_merge(pr)
+            assert result == expected, (
+                f"Failed for mergeable={mergeable}, mergeable_state={mergeable_state}"
+            )

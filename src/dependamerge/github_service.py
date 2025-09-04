@@ -560,7 +560,7 @@ class GitHubService:
                     if comparison.is_similar:
                         debug_console.print(f"   ✅ [green]SIMILAR[/green] - {', '.join(comparison.reasons)}")
                     else:
-                        debug_console.print(f"   ❌ [red]NOT SIMILAR[/red]")
+                        debug_console.print("   ❌ [red]NOT SIMILAR[/red]")
 
                         # Show why it failed
                         if title_score == 0:
@@ -571,9 +571,9 @@ class GitHubService:
 
                         if body_score < 0.6:
                             if target_pr.body is None:
-                                debug_console.print(f"      ⚠️  Target PR has no body")
+                                debug_console.print("      ⚠️  Target PR has no body")
                             elif source_pr.body is None:
-                                debug_console.print(f"      ⚠️  Source PR has no body")
+                                debug_console.print("      ⚠️  Source PR has no body")
                             else:
                                 debug_console.print(f"      📄 Body comparison failed (score: {body_score:.3f})")
 
