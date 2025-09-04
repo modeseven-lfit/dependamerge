@@ -90,7 +90,16 @@ class TestAsyncIntegration:
             "status": "modified",
         }
 
-        mock_async.get = AsyncMock(return_value=pr_data)
+        # Mock different responses for different API calls
+        def mock_get_side_effect(url):
+            if url == "/repos/owner/repo/pulls/42":
+                return pr_data
+            elif url == "/repos/owner/repo/pulls/42/reviews":
+                return []  # Empty reviews list
+            else:
+                return {}
+
+        mock_async.get = AsyncMock(side_effect=mock_get_side_effect)
 
         # Create proper async iterator mock
         class MockAsyncIterator:
@@ -138,8 +147,10 @@ class TestAsyncIntegration:
         assert file_change.changes == 8
         assert file_change.status == "modified"
 
-        # Verify async methods were called
-        mock_async.get.assert_called_once_with("/repos/owner/repo/pulls/42")
+        # Verify async methods were called (PR info and reviews)
+        assert mock_async.get.call_count == 2
+        mock_async.get.assert_any_call("/repos/owner/repo/pulls/42")
+        mock_async.get.assert_any_call("/repos/owner/repo/pulls/42/reviews")
         mock_async.get_paginated.assert_called_once_with(
             "/repos/owner/repo/pulls/42/files", per_page=100
         )

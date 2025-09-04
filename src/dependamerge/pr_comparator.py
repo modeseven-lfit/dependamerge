@@ -3,7 +3,6 @@
 
 import re
 from difflib import SequenceMatcher
-from typing import List, Optional
 
 from .models import ComparisonResult, PullRequestInfo
 
@@ -16,7 +15,10 @@ class PRComparator:
         self.similarity_threshold = similarity_threshold
 
     def compare_pull_requests(
-        self, source_pr: PullRequestInfo, target_pr: PullRequestInfo, only_automation: bool = True
+        self,
+        source_pr: PullRequestInfo,
+        target_pr: PullRequestInfo,
+        only_automation: bool = True,
     ) -> ComparisonResult:
         """Compare two pull requests and determine similarity."""
         reasons = []
@@ -25,7 +27,9 @@ class PRComparator:
         # Check automation requirements based on mode
         if only_automation:
             # Both PRs must be from automation tools
-            if not self._is_automation_pr(source_pr) or not self._is_automation_pr(target_pr):
+            if not self._is_automation_pr(source_pr) or not self._is_automation_pr(
+                target_pr
+            ):
                 return ComparisonResult(
                     is_similar=False,
                     confidence_score=0.0,
@@ -119,7 +123,7 @@ class PRComparator:
         title = " ".join(title.split())
         return title.lower()
 
-    def _compare_file_changes(self, files1: List, files2: List) -> float:
+    def _compare_file_changes(self, files1: list, files2: list) -> float:
         """Compare file changes between PRs."""
         if not files1 or not files2:
             return 0.0
@@ -134,8 +138,8 @@ class PRComparator:
 
         # For GitHub Actions workflows, consider them similar if both modify workflow files
         # This handles cases where different repos have different workflow names
-        workflows1 = {f for f in filenames1 if f.startswith('.github/workflows/')}
-        workflows2 = {f for f in filenames2 if f.startswith('.github/workflows/')}
+        workflows1 = {f for f in filenames1 if f.startswith(".github/workflows/")}
+        workflows2 = {f for f in filenames2 if f.startswith(".github/workflows/")}
 
         if workflows1 and workflows2:
             # Both PRs modify GitHub Actions workflows - consider this a partial match
@@ -173,12 +177,12 @@ class PRComparator:
                 # Clean up the package name
                 package = package.strip()
                 # Remove common prefixes that might vary
-                package = re.sub(r'^["\']|["\']$', '', package)  # Remove quotes
+                package = re.sub(r'^["\']|["\']$', "", package)  # Remove quotes
                 return package
 
         return ""
 
-    def _compare_bodies(self, body1: Optional[str], body2: Optional[str]) -> float:
+    def _compare_bodies(self, body1: str | None, body2: str | None) -> float:
         """Compare PR bodies for similarity in automation patterns."""
         if not body1 or not body2:
             return 0.0
@@ -199,7 +203,7 @@ class PRComparator:
         # Fall back to sequence matching for general similarity
         return SequenceMatcher(None, normalized1, normalized2).ratio()
 
-    def _normalize_body(self, body: Optional[str]) -> str:
+    def _normalize_body(self, body: str | None) -> str:
         """Normalize PR body by removing version-specific and variable content."""
         if not body:
             return ""
@@ -208,26 +212,28 @@ class PRComparator:
         body = body.lower()
 
         # Remove URLs (they often contain version-specific paths)
-        body = re.sub(r'https?://[^\s]+', '', body)
+        body = re.sub(r"https?://[^\s]+", "", body)
 
         # Remove version numbers
-        body = re.sub(r'v?\d+\.\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.-]+)?', 'VERSION', body)
+        body = re.sub(r"v?\d+\.\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.-]+)?", "VERSION", body)
 
         # Remove commit hashes
-        body = re.sub(r'\b[a-f0-9]{7,40}\b', 'COMMIT', body)
+        body = re.sub(r"\b[a-f0-9]{7,40}\b", "COMMIT", body)
 
         # Remove dates
-        body = re.sub(r'\d{4}-\d{2}-\d{2}', 'DATE', body)
+        body = re.sub(r"\d{4}-\d{2}-\d{2}", "DATE", body)
 
         # Remove specific numbers that might be build/PR numbers
-        body = re.sub(r'#\d+', '#NUMBER', body)
+        body = re.sub(r"#\d+", "#NUMBER", body)
 
         # Normalize whitespace
-        body = re.sub(r'\s+', ' ', body).strip()
+        body = re.sub(r"\s+", " ", body).strip()
 
         return body
 
-    def _compare_automation_patterns(self, body1: Optional[str], body2: Optional[str]) -> float:
+    def _compare_automation_patterns(
+        self, body1: str | None, body2: str | None
+    ) -> float:
         """Compare bodies for specific automation tool patterns."""
 
         if not body1 or not body2:
@@ -242,7 +248,7 @@ class PRComparator:
             if package1 and package2 and package1 == package2:
                 return 0.95  # Very high confidence for same package updates
             elif package1 and package2:
-                return 0.1   # Different packages, low similarity
+                return 0.1  # Different packages, low similarity
 
         # Pre-commit patterns
         if self._is_precommit_body(body1) and self._is_precommit_body(body2):
@@ -260,7 +266,7 @@ class PRComparator:
 
         return 0.0
 
-    def _is_dependabot_body(self, body: Optional[str]) -> bool:
+    def _is_dependabot_body(self, body: str | None) -> bool:
         """Check if body contains Dependabot-specific patterns."""
         if not body:
             return False
@@ -272,30 +278,30 @@ class PRComparator:
             "release notes",
             "changelog",
             "commits",
-            "dependency-name:"
+            "dependency-name:",
         ]
 
         body_lower = body.lower()
         return sum(1 for pattern in dependabot_patterns if pattern in body_lower) >= 2
 
-    def _extract_dependabot_package(self, body: Optional[str]) -> str:
+    def _extract_dependabot_package(self, body: str | None) -> str:
         """Extract package name from Dependabot PR body."""
         if not body:
             return ""
 
         # Look for "dependency-name: package" pattern in YAML frontmatter
-        yaml_match = re.search(r'dependency-name:\s*([^\s\n]+)', body, re.IGNORECASE)
+        yaml_match = re.search(r"dependency-name:\s*([^\s\n]+)", body, re.IGNORECASE)
         if yaml_match:
             return yaml_match.group(1).strip()
 
         # Look for "Bumps [package]" pattern
-        bump_match = re.search(r'bumps\s+\[([^\]]+)\]', body, re.IGNORECASE)
+        bump_match = re.search(r"bumps\s+\[([^\]]+)\]", body, re.IGNORECASE)
         if bump_match:
             return bump_match.group(1).strip()
 
         return ""
 
-    def _normalize_author(self, author: Optional[str]) -> str:
+    def _normalize_author(self, author: str | None) -> str:
         """Normalize author name to handle differences between REST and GraphQL APIs.
 
         GitHub's REST API returns 'dependabot[bot]' while GraphQL returns 'dependabot'.
@@ -311,7 +317,7 @@ class PRComparator:
 
         return normalized
 
-    def _is_precommit_body(self, body: Optional[str]) -> bool:
+    def _is_precommit_body(self, body: str | None) -> bool:
         """Check if body contains pre-commit specific patterns."""
         if not body:
             return False
@@ -320,13 +326,13 @@ class PRComparator:
             "pre-commit",
             "autoupdate",
             "hooks",
-            ".pre-commit-config.yaml"
+            ".pre-commit-config.yaml",
         ]
 
         body_lower = body.lower()
         return any(pattern in body_lower for pattern in precommit_patterns)
 
-    def _is_github_actions_body(self, body: Optional[str]) -> bool:
+    def _is_github_actions_body(self, body: str | None) -> bool:
         """Check if body contains GitHub Actions specific patterns."""
         if not body:
             return False
@@ -336,19 +342,19 @@ class PRComparator:
             "workflow",
             "action",
             ".github/workflows",
-            "uses:"
+            "uses:",
         ]
 
         body_lower = body.lower()
         return any(pattern in body_lower for pattern in actions_patterns)
 
-    def _extract_github_action(self, body: Optional[str]) -> str:
+    def _extract_github_action(self, body: str | None) -> str:
         """Extract action name from GitHub Actions PR body."""
         if not body:
             return ""
 
         # Look for "uses: action/name@version" pattern
-        uses_match = re.search(r'uses:\s*([^@\s]+)', body, re.IGNORECASE)
+        uses_match = re.search(r"uses:\s*([^@\s]+)", body, re.IGNORECASE)
         if uses_match:
             return uses_match.group(1).strip()
 

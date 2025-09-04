@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-import os
 import asyncio
+import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
-
-
+from typing import TYPE_CHECKING, Any, Optional
 
 from .models import (
     FileChange,
     OrganizationScanResult,
     PullRequestInfo,
+    ReviewInfo,
 )
 
 if TYPE_CHECKING:
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
 class GitHubClient:
     """GitHub API client for managing pull requests."""
 
-    def __init__(self, token: Optional[str] = None):
+    def __init__(self, token: str | None = None):
         """Initialize GitHub client with token."""
         self.token = token or os.getenv("GITHUB_TOKEN")
         if not self.token:
@@ -58,8 +57,12 @@ class GitHubClient:
 
         async def _run() -> PullRequestInfo:
             async with GitHubAsync(token=self.token) as api:
-                pr: Dict[str, Any] = await api.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
-                files_changed: List[FileChange] = []
+                pr_response = await api.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
+                assert isinstance(pr_response, dict), (
+                    "PR endpoint should return a dictionary"
+                )
+                pr: dict[str, Any] = pr_response
+                files_changed: list[FileChange] = []
                 try:
                     async for page in api.get_paginated(
                         f"/repos/{owner}/{repo}/pulls/{pr_number}/files", per_page=100
@@ -72,12 +75,46 @@ class GitHubClient:
                                     filename=file_data.get("filename", ""),
                                     additions=int(file_data.get("additions", 0)),
                                     deletions=int(file_data.get("deletions", 0)),
-                                    changes=int(file_data.get("changes", (file_data.get("additions", 0) or 0) + (file_data.get("deletions", 0) or 0))),
+                                    changes=int(
+                                        file_data.get(
+                                            "changes",
+                                            (file_data.get("additions", 0) or 0)
+                                            + (file_data.get("deletions", 0) or 0),
+                                        )
+                                    ),
                                     status=file_data.get("status", "modified"),
                                 )
                             )
                 except Exception:
                     # If pagination of files fails, continue with what we have
+                    pass
+
+                # Fetch reviews
+                reviews: list[ReviewInfo] = []
+                try:
+                    review_response = await api.get(
+                        f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+                    )
+                    assert isinstance(review_response, list), (
+                        "Reviews endpoint should return a list"
+                    )
+                    review_data = review_response
+                    # review_data is a list of review dictionaries
+                    for review in review_data:
+                        if review.get("user") and review.get("state"):
+                            reviews.append(
+                                ReviewInfo(
+                                    # NOTE: REST API returns string IDs that look numeric but may be node IDs
+                                    # Do not convert to int() - keep as string to match GraphQL behavior
+                                    id=review.get("id", ""),
+                                    user=review.get("user", {}).get("login", ""),
+                                    state=review.get("state", ""),
+                                    submitted_at=review.get("submitted_at", ""),
+                                    body=review.get("body"),
+                                )
+                            )
+                except Exception:
+                    # If review fetching fails, continue without reviews
                     pass
 
                 return PullRequestInfo(
@@ -95,18 +132,19 @@ class GitHubClient:
                     files_changed=files_changed,
                     repository_full_name=f"{owner}/{repo}",
                     html_url=pr.get("html_url") or "",
+                    reviews=reviews,
                 )
 
         return asyncio.run(_run())  # type: ignore[no-any-return]
 
     def get_pull_request_commits(
         self, owner: str, repo: str, pr_number: int
-    ) -> List[str]:
+    ) -> list[str]:
         """Get commit messages from a pull request using the async REST client."""
         from .github_async import GitHubAsync
 
-        async def _run() -> List[str]:
-            messages: List[str] = []
+        async def _run() -> list[str]:
+            messages: list[str] = []
             async with GitHubAsync(token=self.token) as api:
                 async for page in api.get_paginated(
                     f"/repos/{owner}/{repo}/pulls/{pr_number}/commits", per_page=100
@@ -114,19 +152,19 @@ class GitHubClient:
                     for c in page:
                         commit_data = c
                         assert isinstance(commit_data, dict)
-                        msg = ((commit_data.get("commit") or {}).get("message") or "")
+                        msg = (commit_data.get("commit") or {}).get("message") or ""
                         if msg:
                             messages.append(msg)
             return messages
 
         return asyncio.run(_run())
 
-    def get_organization_repositories(self, org_name: str) -> List[str]:
+    def get_organization_repositories(self, org_name: str) -> list[str]:
         """Get all repositories in an organization using REST API. Returns list of full_name strings."""
         from .github_async import GitHubAsync
 
-        async def _run() -> List[str]:
-            repos: List[str] = []
+        async def _run() -> list[str]:
+            repos: list[str] = []
             async with GitHubAsync(token=self.token) as api:
                 try:
                     async for page in api.get_paginated(
@@ -145,7 +183,7 @@ class GitHubClient:
 
         return asyncio.run(_run())
 
-    def get_open_pull_requests(self, repository) -> List[Any]:
+    def get_open_pull_requests(self, repository) -> list[Any]:
         """Legacy method not supported in async-only client. Use async service for PR enumeration."""
         return []
 
@@ -179,7 +217,9 @@ class GitHubClient:
 
             async def _run():
                 async with GitHubAsync(token=self.token) as api:
-                    return await api.merge_pull_request(owner, repo, pr_number, merge_method)
+                    return await api.merge_pull_request(
+                        owner, repo, pr_number, merge_method
+                    )
 
             return bool(asyncio.run(_run()))
         except Exception as e:
@@ -249,28 +289,80 @@ class GitHubClient:
                 async with GitHubAsync(token=self.token) as api:
                     # Reviews
                     approved = False
+                    human_changes_requested = False
+                    unresolved_copilot_reviews = 0
+                    unresolved_copilot_comments = 0
+
                     try:
-                        reviews = await api.get(f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}/reviews")
-                        approved = any(r.get("state") == "APPROVED" for r in reviews)
+                        reviews = await api.get(
+                            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}/reviews"
+                        )
+                        for review in reviews:
+                            state = review.get("state")
+                            author = review.get("user", {}).get("login", "")
+
+                            if state == "APPROVED":
+                                approved = True
+                            elif state == "CHANGES_REQUESTED":
+                                if author == "github-copilot[bot]":
+                                    unresolved_copilot_reviews += 1
+                                else:
+                                    human_changes_requested = True
                     except Exception:
                         pass
 
-                    # Check runs - look for failing
-                    failing = False
+                    # Check for unresolved review comments
                     try:
-                        runs = await api.get(f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/check-runs")
-                        for run in (runs.get("check_runs") or []):
-                            run_data = run
-                            if run_data.get("conclusion") in ["failure", "cancelled", "timed_out"]:
-                                failing = True
-                                break
+                        comments = await api.get(
+                            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}/comments"
+                        )
+                        for comment in comments:
+                            author = comment.get("user", {}).get("login", "")
+                            # Count unresolved Copilot comments (those without replies dismissing them)
+                            if author == "github-copilot[bot]":
+                                # Simple heuristic: if comment doesn't have "DISMISSED" or similar resolution text
+                                body = comment.get("body", "").lower()
+                                if "dismissed" not in body and "resolved" not in body:
+                                    unresolved_copilot_comments += 1
                     except Exception:
                         pass
 
-                    if failing:
-                        return "Blocked by failing checks"
+                    # Check runs - look for failing (check this first as it's most specific)
+                    failing_checks = []
+                    try:
+                        runs = await api.get(
+                            f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/check-runs"
+                        )
+                        for run in runs.get("check_runs") or []:
+                            conclusion = run.get("conclusion")
+                            if conclusion in ["failure", "cancelled", "timed_out"]:
+                                failing_checks.append(run.get("name", "unknown"))
+                    except Exception:
+                        pass
+
+                    # Prioritize blocking conditions by specificity
+                    # Most specific blockers first
+                    if failing_checks:
+                        if len(failing_checks) == 1:
+                            return f"Blocked by failing check: {failing_checks[0]}"
+                        else:
+                            return f"Blocked by {len(failing_checks)} failing checks"
+
+                    if human_changes_requested:
+                        return "Human reviewer requested changes"
+
+                    if unresolved_copilot_reviews > 0:
+                        if unresolved_copilot_comments > 0:
+                            return f"Blocked by {unresolved_copilot_reviews} Copilot reviews, {unresolved_copilot_comments} comments"
+                        else:
+                            return f"Blocked by {unresolved_copilot_reviews} unresolved Copilot reviews"
+
+                    if unresolved_copilot_comments > 0:
+                        return f"Blocked by {unresolved_copilot_comments} unresolved Copilot comments"
+
                     if not approved:
-                        return "Requires approval"
+                        return "Blocked by branch protection (requires approval)"
+
                     return "Blocked by branch protection"
 
             return asyncio.run(_run())  # type: ignore[no-any-return]

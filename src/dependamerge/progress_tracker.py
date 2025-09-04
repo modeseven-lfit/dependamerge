@@ -2,27 +2,41 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Any
+
 try:
+    from rich.console import Console
     from rich.live import Live
     from rich.text import Text
-    from rich.console import Console
+
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
+
     # Fallback classes for when Rich is not available
     class Live:  # type: ignore
-        def __init__(self, *args, **kwargs): pass
-        def start(self): pass
-        def stop(self): pass
-        def update(self, *args): pass
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def update(self, *args):
+            pass
 
     class Text:  # type: ignore
-        def __init__(self, *args, **kwargs): pass
-        def append(self, *args, **kwargs): pass
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def append(self, *args, **kwargs):
+            pass
 
     class Console:  # type: ignore
-        def __init__(self, *args, **kwargs): pass
+        def __init__(self, *args, **kwargs):
+            pass
 
 
 class ProgressTracker:
@@ -49,15 +63,15 @@ class ProgressTracker:
 
         # Rate limiting tracking
         self.rate_limited = False
-        self.rate_limit_reset_time: Optional[datetime] = None
+        self.rate_limit_reset_time: datetime | None = None
 
         # Rich Live display
-        self.live: Optional[Live] = None
+        self.live: Live | None = None
         self.rich_available = RICH_AVAILABLE
         self.paused = False
         # Metrics (optional; displayed when provided)
-        self.metrics_concurrency: Optional[int] = None
-        self.metrics_rps: Optional[float] = None
+        self.metrics_concurrency: int | None = None
+        self.metrics_rps: float | None = None
 
         # Fallback for when Rich is not available
         self._last_display = ""
@@ -72,7 +86,7 @@ class ProgressTracker:
                 self._generate_display_text(),
                 console=self.console,
                 refresh_per_second=2,
-                transient=False
+                transient=False,
             )
             if self.live:
                 self.live.start()
@@ -109,7 +123,7 @@ class ProgressTracker:
                     self._generate_display_text(),
                     console=self.console,
                     refresh_per_second=2,
-                    transient=False
+                    transient=False,
                 )
                 if self.live:
                     self.live.start()
@@ -197,7 +211,10 @@ class ProgressTracker:
             progress_pct = (self.completed_repositories / self.total_repositories) * 100
             text.append("🔍 Checking ", style="bold blue")
             text.append(f"{self.organization} ", style="bold cyan")
-            text.append(f"({self.completed_repositories}/{self.total_repositories} repos, ", style="white")
+            text.append(
+                f"({self.completed_repositories}/{self.total_repositories} repos, ",
+                style="white",
+            )
             text.append(f"{progress_pct:.0f}%", style="green")
             text.append(") | ", style="white")
         else:
@@ -223,7 +240,9 @@ class ProgressTracker:
         if self.rate_limited and self.rate_limit_reset_time:
             remaining = self.rate_limit_reset_time - datetime.now()
             if remaining.total_seconds() > 0:
-                text.append(f"⏳ Rate limited - waiting {remaining.seconds}s", style="yellow")
+                text.append(
+                    f"⏳ Rate limited - waiting {remaining.seconds}s", style="yellow"
+                )
             else:
                 text.append("⚡ Rate limit reset - resuming...", style="green")
         else:
@@ -268,7 +287,7 @@ class ProgressTracker:
         else:
             return f"{seconds}s"
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Get a summary of the checking progress."""
         elapsed = datetime.now() - self.start_time
 
@@ -280,7 +299,7 @@ class ProgressTracker:
             "unmergeable_prs_found": self.unmergeable_prs_found,
             "errors_count": self.errors_count,
             "elapsed_time": self._format_duration(elapsed),
-            "rate_limited": self.rate_limited
+            "rate_limited": self.rate_limited,
         }
 
 
@@ -319,7 +338,10 @@ class MergeProgressTracker(ProgressTracker):
         if self.total_repositories > 0:
             progress_pct = (self.completed_repositories / self.total_repositories) * 100
             text.append("🔀 Searching for similar PRs ", style="bold blue")
-            text.append(f"({self.completed_repositories}/{self.total_repositories} repos, ", style="white")
+            text.append(
+                f"({self.completed_repositories}/{self.total_repositories} repos, ",
+                style="white",
+            )
             text.append(f"{progress_pct:.0f}%", style="green")
             text.append(") | ", style="white")
         else:
@@ -343,7 +365,9 @@ class MergeProgressTracker(ProgressTracker):
         if self.rate_limited and self.rate_limit_reset_time:
             remaining = self.rate_limit_reset_time - datetime.now()
             if remaining.total_seconds() > 0:
-                text.append(f"⏳ Rate limited - waiting {remaining.seconds}s", style="yellow")
+                text.append(
+                    f"⏳ Rate limited - waiting {remaining.seconds}s", style="yellow"
+                )
             else:
                 text.append("⚡ Rate limit reset - resuming...", style="green")
         else:
@@ -355,15 +379,16 @@ class MergeProgressTracker(ProgressTracker):
 
         return text
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Get merge-specific summary."""
-        elapsed = datetime.now() - self.start_time
         summary = super().get_summary()
-        summary.update({
-            "similar_prs_found": self.similar_prs_found,
-            "prs_merged": self.prs_merged,
-            "merge_failures": self.merge_failures,
-        })
+        summary.update(
+            {
+                "similar_prs_found": self.similar_prs_found,
+                "prs_merged": self.prs_merged,
+                "merge_failures": self.merge_failures,
+            }
+        )
         return summary
 
 
@@ -412,5 +437,5 @@ class DummyProgressTracker:
     def merge_failure(self):
         pass
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         return {"organization": self.organization}

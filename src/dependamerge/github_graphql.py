@@ -18,6 +18,7 @@ __all__ = [
     "ORG_REPOS_ONLY",
     "ORG_REPOS_WITH_OPEN_PRS",
     "REPO_OPEN_PRS_PAGE",
+    "GET_BRANCH_PROTECTION",
 ]
 
 # Lightweight query to list repositories without PR nodes for accurate counting
@@ -90,6 +91,17 @@ query($org: String!, $reposCursor: String) {
                 createdAt
               }
             }
+            reviews(first: 20, states: [PENDING, COMMENTED, APPROVED, CHANGES_REQUESTED]) {
+              nodes {
+                id
+                author { login }
+                state
+                body
+                createdAt
+                updatedAt
+              }
+            }
+
             commits(last: 1) {
               nodes {
                 commit {
@@ -166,6 +178,17 @@ query($owner: String!, $name: String!, $prsCursor: String, $prsPageSize: Int!, $
             createdAt
           }
         }
+        reviews(first: 20, states: [PENDING, COMMENTED, APPROVED, CHANGES_REQUESTED]) {
+          nodes {
+            id
+            author { login }
+            state
+            body
+            createdAt
+            updatedAt
+          }
+        }
+
         commits(last: 1) {
           nodes {
             commit {
@@ -190,6 +213,122 @@ query($owner: String!, $name: String!, $prsCursor: String, $prsPageSize: Int!, $
             }
           }
         }
+      }
+    }
+  }
+}
+"""
+
+# GraphQL mutations for managing review comments and reviews
+DISMISS_REVIEW_COMMENT = """
+mutation DismissReviewComment($commentId: ID!) {
+  dismissPullRequestReviewComment(input: {
+    pullRequestReviewCommentId: $commentId
+  }) {
+    pullRequestReviewComment {
+      id
+      state
+      author { login }
+    }
+  }
+}
+"""
+
+# GraphQL mutation to resolve a review thread
+RESOLVE_REVIEW_THREAD = """
+mutation ResolveReviewThread($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread {
+      id
+      isResolved
+    }
+  }
+}
+"""
+
+# GraphQL query to get review threads for a pull request
+GET_PR_REVIEW_THREADS = """
+query GetPullRequestReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          line
+          originalLine
+          diffSide
+          startLine
+          originalStartLine
+          path
+          comments(first: 10) {
+            nodes {
+              id
+              author {
+                login
+              }
+              body
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+DISMISS_PULL_REQUEST_REVIEW = """
+mutation DismissPullRequestReview($reviewId: ID!, $message: String!) {
+  dismissPullRequestReview(input: {
+    pullRequestReviewId: $reviewId
+    message: $message
+  }) {
+    pullRequestReview {
+      id
+      state
+      author { login }
+    }
+  }
+}
+"""
+
+RESOLVE_REVIEW_THREAD = """
+mutation ResolveReviewThread($threadId: ID!) {
+  resolveReviewThread(input: {
+    threadId: $threadId
+  }) {
+    thread {
+      id
+      isResolved
+    }
+  }
+}
+"""
+
+# GraphQL query to get branch protection settings for a repository
+GET_BRANCH_PROTECTION = """
+query GetBranchProtection($owner: String!, $name: String!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    mergeCommitAllowed
+    squashMergeAllowed
+    rebaseMergeAllowed
+    ref(qualifiedName: $branch) {
+      branchProtectionRule {
+        requiresLinearHistory
+        requiredStatusCheckContexts
+        requiresStatusChecks
+        requiresApprovingReviews
+        requiredApprovingReviewCount
+        dismissesStaleReviews
+        requiresCodeOwnerReviews
+        restrictsPushes
+        restrictsReviewDismissals
       }
     }
   }

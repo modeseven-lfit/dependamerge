@@ -1,50 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
+import asyncio
 import hashlib
 import os
-import asyncio
-from typing import List, Optional
 
 import requests
 import typer
-from typer.core import TyperGroup
-
 import urllib3.exceptions
 from rich.console import Console
 from rich.table import Table
 
 from .github_client import GitHubClient
+from .merge_manager import AsyncMergeManager
 from .models import PullRequestInfo
 from .pr_comparator import PRComparator
-from .progress_tracker import ProgressTracker, MergeProgressTracker
-from .resolve_conflicts import FixOrchestrator, FixOptions, PRSelection
+from .progress_tracker import MergeProgressTracker, ProgressTracker
+from .resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
 
 # Constants
 MAX_RETRIES = 2
 
-class DefaultCommandGroup(TyperGroup):
-    def __init__(self, *args, default="merge", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.default_command_name = default
-
-    def parse_args(self, ctx, args):
-        # If the first token isn't a known subcommand and isn't an option,
-        # treat it as arguments to the default command.
-        if args and not args[0].startswith("-"):
-            cmd = self.get_command(ctx, args[0])
-            if cmd is None and self.default_command_name:
-                args.insert(0, self.default_command_name)
-        return super().parse_args(ctx, args)
-
-
 app = typer.Typer(
-    cls=DefaultCommandGroup,
     help="Find blocked PRs in GitHub organizations and automatically merge pull requests"
 )
 console = Console(markup=False)
-
-
 
 
 def _generate_override_sha(
@@ -88,6 +68,42 @@ def _validate_override_sha(
     return provided_sha == expected_sha
 
 
+def _format_condensed_similarity(comparison) -> str:
+    """Format similarity comparison result in condensed format."""
+    reasons = comparison.reasons
+
+    # Check if same author is present
+    has_same_author = any("Same automation author" in reason for reason in reasons)
+
+    # Extract individual scores from reasons
+    score_parts = []
+    for reason in reasons:
+        if "Similar titles (score:" in reason:
+            score = reason.split("score: ")[1].replace(")", "")
+            score_parts.append(f"title {score}")
+        elif "Similar PR descriptions (score:" in reason:
+            score = reason.split("score: ")[1].replace(")", "")
+            score_parts.append(f"descriptions {score}")
+        elif "Similar file changes (score:" in reason:
+            score = reason.split("score: ")[1].replace(")", "")
+            score_parts.append(f"changes {score}")
+
+    # Build condensed format
+    if has_same_author:
+        author_text = "Same author; "
+    else:
+        author_text = ""
+
+    total_score = f"total score: {comparison.confidence_score:.2f}"
+
+    if score_parts:
+        breakdown = f" [{', '.join(score_parts)}]"
+    else:
+        breakdown = ""
+
+    return f"{author_text}{total_score}{breakdown}"
+
+
 @app.command()
 def merge(
     pr_url: str = typer.Argument(..., help="GitHub pull request URL"),
@@ -100,37 +116,47 @@ def merge(
     merge_method: str = typer.Option(
         "merge", "--merge-method", help="Merge method: merge, squash, or rebase"
     ),
-    token: Optional[str] = typer.Option(
+    token: str | None = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
     ),
-    override: Optional[str] = typer.Option(
+    override: str | None = typer.Option(
         None, "--override", help="SHA hash to override non-automation PR restriction"
     ),
-    fix: bool = typer.Option(
-        False, "--fix", help="Automatically fix out-of-date branches before merging"
+    no_fix: bool = typer.Option(
+        False,
+        "--no-fix",
+        help="Do not attempt to automatically fix out-of-date branches",
     ),
     show_progress: bool = typer.Option(
         True, "--progress/--no-progress", help="Show real-time progress updates"
     ),
     debug_matching: bool = typer.Option(
-        False, "--debug-matching", help="Show detailed scoring information for PR matching"
+        False,
+        "--debug-matching",
+        help="Show detailed scoring information for PR matching",
+    ),
+    dismiss_copilot: bool = typer.Option(
+        False,
+        "--dismiss-copilot",
+        help="Automatically dismiss unresolved GitHub Copilot review comments",
     ),
 ):
     """
-    Merge automation pull requests across an organization.
+    Bulk approve/merge pull requests across a GitHub organization.
 
     This command will:
+
     1. Analyze the provided PR
+
     2. Find similar PRs in the organization
+
     3. Approve and merge matching PRs
 
-    For automation PRs (dependabot, pre-commit-ci, etc.):
-    - Merges similar PRs from the same automation tool
+    4. Automatically fix out-of-date branches (use --no-fix to disable)
 
-    For non-automation PRs:
-    - Requires --override flag with SHA hash
-    - Only merges PRs from the same author
-    - SHA is generated from author + commit message
+    Merges similar PRs from the same automation tool (dependabot, pre-commit.ci).
+
+    For user generated bulk PRs, use the --override flag with SHA hash.
     """
     # Initialize progress tracker
     progress_tracker = None
@@ -162,6 +188,13 @@ def merge(
             source_pr: PullRequestInfo = github_client.get_pull_request_info(
                 owner, repo_name, pr_number
             )
+
+            # Skip closed PRs early
+            if source_pr.state != "open":
+                if progress_tracker:
+                    progress_tracker.stop()
+                console.print(f"🛑 Failed: {pr_url} [already closed]")
+                raise typer.Exit(1)
         except (
             urllib3.exceptions.NameResolutionError,
             urllib3.exceptions.MaxRetryError,
@@ -177,17 +210,25 @@ def merge(
             raise typer.Exit(1) from e
 
         # Display source PR info
-        _display_pr_info(source_pr, "Source PR", github_client, progress_tracker=progress_tracker)
+        _display_pr_info(
+            source_pr, "", github_client, progress_tracker=progress_tracker
+        )
 
         # Debug matching info for source PR
         if debug_matching:
             console.print("\n🔍 [bold]Debug Matching Information[/bold]")
-            console.print(f"   Source PR automation status: {github_client.is_automation_author(source_pr.author)}")
-            console.print(f"   Extracted package: '{comparator._extract_package_name(source_pr.title)}'")
+            console.print(
+                f"   Source PR automation status: {github_client.is_automation_author(source_pr.author)}"
+            )
+            console.print(
+                f"   Extracted package: '{comparator._extract_package_name(source_pr.title)}'"
+            )
             console.print(f"   Similarity threshold: {similarity_threshold}")
             if source_pr.body:
                 console.print(f"   Body preview: {source_pr.body[:100]}...")
-                console.print(f"   Is dependabot body: {comparator._is_dependabot_body(source_pr.body)}")
+                console.print(
+                    f"   Is dependabot body: {comparator._is_dependabot_body(source_pr.body)}"
+                )
             else:
                 console.print("   ⚠️  Source PR has no body")
             console.print()
@@ -235,9 +276,7 @@ def merge(
             console.print(f"\nChecking organization: {owner}")
 
         try:
-            repositories: List[str] = (
-                github_client.get_organization_repositories(owner)
-            )
+            repositories: list[str] = github_client.get_organization_repositories(owner)
         except (
             urllib3.exceptions.NameResolutionError,
             urllib3.exceptions.MaxRetryError,
@@ -272,11 +311,16 @@ def merge(
         all_similar_prs = []
 
         from .github_service import GitHubService
+
         if progress_tracker:
             progress_tracker.update_operation("Listing repositories...")
 
         async def _find_similar():
-            svc = GitHubService(token=token, progress_tracker=progress_tracker, debug_matching=debug_matching)
+            svc = GitHubService(
+                token=token,
+                progress_tracker=progress_tracker,
+                debug_matching=debug_matching,
+            )
             try:
                 only_automation = github_client.is_automation_author(source_pr.author)
                 return await svc.find_similar_prs(
@@ -290,18 +334,19 @@ def merge(
 
         all_similar_prs = asyncio.run(_find_similar())
 
-
         # Stop progress tracker and show results
         if progress_tracker:
             progress_tracker.stop()
             summary = progress_tracker.get_summary()
-            elapsed_time = summary.get('elapsed_time')
-            total_prs_analyzed = summary.get('total_prs_analyzed')
-            completed_repositories = summary.get('completed_repositories')
-            similar_prs_found = summary.get('similar_prs_found')
-            errors_count = summary.get('errors_count', 0)
+            elapsed_time = summary.get("elapsed_time")
+            total_prs_analyzed = summary.get("total_prs_analyzed")
+            completed_repositories = summary.get("completed_repositories")
+            similar_prs_found = summary.get("similar_prs_found")
+            errors_count = summary.get("errors_count", 0)
             console.print(f"\n✅ Analysis completed in {elapsed_time}")
-            console.print(f"📊 Analyzed {total_prs_analyzed} PRs across {completed_repositories} repositories")
+            console.print(
+                f"📊 Analyzed {total_prs_analyzed} PRs across {completed_repositories} repositories"
+            )
             console.print(f"🔍 Found {similar_prs_found} similar PRs")
             if errors_count > 0:
                 console.print(f"⚠️  {errors_count} errors encountered during analysis")
@@ -313,82 +358,92 @@ def merge(
         console.print(f"Found {len(all_similar_prs)} similar PRs:")
 
         for target_pr, comparison in all_similar_prs:
-            console.print(f"  • {target_pr.repository_full_name}#{target_pr.number}: {target_pr.title}")
-            console.print(f"    Similarity: {comparison.confidence_score:.2f} - {', '.join(comparison.reasons)}")
+            console.print(f"  • {target_pr.repository_full_name} #{target_pr.number}")
+            console.print(f"    {_format_condensed_similarity(comparison)}")
 
         if dry_run:
-            console.print("\n🔍 Dry run mode - no changes will be made")
-            return
+            # IMPORTANT: Each PR must produce exactly ONE line of output in this section
+            # This ensures clean, consistent evaluation reporting format
+            console.print("\n🔍 Dependamerge Evaluation\n")
 
-        # Merge similar PRs
-        console.print(f"\nMerging {len(all_similar_prs)} similar PRs...")
+        # Merge PRs in parallel using async merge manager
+        async def _merge_parallel():
+            # Add source PR to the list for parallel processing
+            all_prs_to_merge = all_similar_prs + [(source_pr, None)]
 
-        merged_count = 0
-        for target_pr, _comparison in all_similar_prs:
-            repo_owner, repo_name = target_pr.repository_full_name.split("/")
+            async with AsyncMergeManager(
+                token=token,
+                merge_method=merge_method,
+                max_retries=MAX_RETRIES,
+                concurrency=10,  # Process up to 10 PRs concurrently
+                fix_out_of_date=not no_fix,  # Fix is default, --no-fix disables it
+                progress_tracker=progress_tracker,
+                dry_run=dry_run,
+                dismiss_copilot=dismiss_copilot,
+            ) as merge_manager:
+                if dry_run:
+                    pass  # No merge message in dry-run mode
+                else:
+                    console.print(
+                        f"\n🚀 Merging {len(all_prs_to_merge)} pull requests..."
+                    )
+                results = await merge_manager.merge_prs_parallel(all_prs_to_merge)
+                return results
 
-            if fix:
-                # Try to fix out-of-date PRs
-                if target_pr.mergeable_state == "behind":
-                    console.print(f"🔧 Fixing out-of-date PR {target_pr.repository_full_name}#{target_pr.number}")
-                    github_client.fix_out_of_date_pr(repo_owner, repo_name, target_pr.number)
+        # Run the parallel merge process
+        merge_results = asyncio.run(_merge_parallel())
 
-            success = _merge_single_pr(
-                target_pr,
-                github_client,
-                merge_method,
-                console
-            )
-
-            if success:
-                merged_count += 1
-                if progress_tracker:
-                    progress_tracker.merge_success()
+        # Display results
+        if merge_results:
+            # Create a simple summary from results
+            merged_count = sum(1 for r in merge_results if r.status.value == "merged")
+            failed_count = sum(1 for r in merge_results if r.status.value == "failed")
+            skipped_count = sum(1 for r in merge_results if r.status.value == "skipped")
+            blocked_count = sum(1 for r in merge_results if r.status.value == "blocked")
+            total_to_merge = len(merge_results)
+            if dry_run:
+                console.print(f"\n▶️ Mergeable {merged_count}/{total_to_merge} PRs")
             else:
-                if progress_tracker:
-                    progress_tracker.merge_failure()
+                console.print(f"\n✅ Success {merged_count}/{total_to_merge} PRs")
 
-        # Finally merge the source PR
-        source_repo_owner, source_repo_name = source_pr.repository_full_name.split("/")
+            if failed_count > 0:
+                if dry_run:
+                    console.print(f"❌ Would fail to merge {failed_count} PRs")
+                else:
+                    console.print(f"❌ Failed {failed_count} PRs")
+            if skipped_count > 0:
+                console.print(f"⏭️  Skipped {skipped_count} PRs")
+            if blocked_count > 0:
+                console.print(f"🛑 Blocked {blocked_count} PRs")
 
-        if fix and source_pr.mergeable_state == "behind":
-            console.print(f"🔧 Fixing out-of-date source PR {source_pr.repository_full_name}#{source_pr.number}")
-            github_client.fix_out_of_date_pr(source_repo_owner, source_repo_name, source_pr.number)
+            if not dry_run:
+                console.print(
+                    f"📈 Final Results: {merged_count} merged, {failed_count} failed"
+                )
 
-        console.print(f"\nMerging source PR #{source_pr.number} in {source_pr.repository_full_name}...")
-        source_success = _merge_single_pr(
-            source_pr,
-            github_client,
-            merge_method,
-            console
-        )
-
-        if source_success:
-            merged_count += 1
-            if progress_tracker:
-                progress_tracker.merge_success()
         else:
-            if progress_tracker:
-                progress_tracker.merge_failure()
+            console.print("❌ No PRs were processed")
 
-        total_to_merge = len(all_similar_prs) + 1
-        console.print(f"\n✅ Successfully merged {merged_count}/{total_to_merge} PRs")
-
-        if progress_tracker:
-            final_summary = progress_tracker.get_summary()
-            prs_merged = final_summary.get('prs_merged', 0)
-            merge_failures = final_summary.get('merge_failures', 0)
-            console.print(f"📈 Final Results: {prs_merged} merged, {merge_failures} failed")
-
-    except Exception as e:
-        # Ensure progress tracker is stopped even if merge fails
+    except typer.Exit:
+        # Handle typer exits (like closed PR errors) gracefully - already printed message
         if progress_tracker:
             progress_tracker.stop()
-        console.print(f"Error: {e}")
+        # Re-raise without additional error messages
+        raise
+    except Exception as e:
+        # Ensure progress tracker is stopped even if an unexpected error occurs
+        if progress_tracker:
+            progress_tracker.stop()
+        console.print(f"❌ Unexpected error: {e}")
         raise typer.Exit(1) from e
 
 
-def _display_pr_info(pr: PullRequestInfo, title: str, github_client: GitHubClient, progress_tracker: Optional[ProgressTracker] = None) -> None:
+def _display_pr_info(
+    pr: PullRequestInfo,
+    title: str,
+    github_client: GitHubClient,
+    progress_tracker: ProgressTracker | None = None,
+) -> None:
     """Display pull request information in a formatted table."""
     table = Table(title=title)
     table.add_column("Property", style="cyan")
@@ -413,161 +468,64 @@ def _display_pr_info(pr: PullRequestInfo, title: str, github_client: GitHubClien
         progress_tracker.resume()
 
 
-def _merge_single_pr(
-    pr_info: PullRequestInfo,
-    github_client: GitHubClient,
-    merge_method: str,
-    console: Console,
-) -> bool:
-    """
-    Merge a single pull request.
-
-    Returns True if successfully merged, False otherwise.
-    """
-    repo_owner, repo_name = pr_info.repository_full_name.split("/")
-
-    # Get initial status
-    status = github_client.get_pr_status_details(pr_info)
-
-    # Handle different types of blocks intelligently
-    if pr_info.mergeable_state == "blocked" and pr_info.mergeable is True:
-        # This is likely blocked by branch protection (review required, etc.)
-        # Don't show "attempting anyway" message since this is expected and handleable
-        pass
-    elif pr_info.mergeable_state == "blocked" and pr_info.mergeable is False:
-        console.print(
-            f"PR {pr_info.number} is blocked by failing checks - attempting merge anyway"
-        )
-    elif not pr_info.mergeable:
-        console.print(
-            f"Skipping unmergeable PR {pr_info.number} in {pr_info.repository_full_name} ({status})"
-        )
-        return False
-
-    # Approve PR
-    console.print(f"Approving PR {pr_info.number} in {pr_info.repository_full_name}")
-    if not github_client.approve_pull_request(repo_owner, repo_name, pr_info.number):
-        console.print(f"Failed to approve PR {pr_info.number} ❌")
-        return False
-
-    # Attempt merge with retry logic for different failure conditions
-    for attempt in range(MAX_RETRIES + 1):
-        if attempt == 0:
-            console.print(
-                f"Merging PR {pr_info.number} in {pr_info.repository_full_name}"
-            )
-        else:
-            console.print(
-                f"Merging PR {pr_info.number} in {pr_info.repository_full_name} (retry {attempt})"
-            )
-
-        merge_result = github_client.merge_pull_request(
-            repo_owner, repo_name, pr_info.number, merge_method
-        )
-
-        if merge_result:
-            console.print(f"Successfully merged PR {pr_info.number} ✅")
-            return True
-
-        # If merge failed, check if we can fix the issue and retry
-        if attempt < MAX_RETRIES:
-            # Only refresh PR info if current state suggests it might be fixable
-            should_retry = False
-
-            if (
-                pr_info.mergeable_state == "behind"
-                or pr_info.mergeable_state == "unknown"
-            ):
-                # These states might benefit from refreshing and potentially fixing
-                try:
-                    updated_pr_info = github_client.get_pull_request_info(
-                        repo_owner, repo_name, pr_info.number
-                    )
-
-                    # Check if branch is out of date and can be fixed
-                    if updated_pr_info.mergeable_state == "behind":
-                        console.print(
-                            f"PR {pr_info.number} is out of date - updating branch and retrying"
-                        )
-                        if github_client.fix_out_of_date_pr(
-                            repo_owner, repo_name, pr_info.number
-                        ):
-                            console.print(
-                                f"Successfully updated PR {pr_info.number} branch ✅"
-                            )
-                            pr_info = updated_pr_info  # Update for next attempt
-                            should_retry = True
-                        else:
-                            console.print(
-                                f"Failed to update PR {pr_info.number} branch ❌"
-                            )
-                    elif updated_pr_info.mergeable_state != pr_info.mergeable_state:
-                        # State changed, worth retrying with new state
-                        pr_info = updated_pr_info
-                        should_retry = True
-
-                except Exception as e:
-                    console.print(f"Warning: Failed to refresh PR info for retry: {e}")
-
-            if should_retry:
-                continue
-            else:
-                # Other types of merge failures - no point in retrying
-                break
-
-    if MAX_RETRIES > 0:
-        console.print(
-            f"Failed to merge PR {pr_info.number} after {MAX_RETRIES} retries ❌"
-        )
-    else:
-        console.print(
-            f"Failed to merge PR {pr_info.number} ❌"
-        )
-    return False
-
-
 @app.command()
 def blocked(
-    organization: str = typer.Argument(..., help="GitHub organization name to check for blocked PRs"),
-    token: Optional[str] = typer.Option(
+    organization: str = typer.Argument(
+        ..., help="GitHub organization name to check for blocked PRs"
+    ),
+    token: str | None = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
     ),
     output_format: str = typer.Option(
         "table", "--format", help="Output format: table, json"
     ),
     fix: bool = typer.Option(
-        False, "--fix", help="Interactively rebase to resolve conflicts and force-push updates"
+        False,
+        "--fix",
+        help="Interactively rebase to resolve conflicts and force-push updates",
     ),
-    limit: Optional[int] = typer.Option(
+    limit: int | None = typer.Option(
         None, "--limit", help="Maximum number of PRs to attempt fixing"
     ),
-    reason: Optional[str] = typer.Option(
-        None, "--reason", help="Only fix PRs with this blocking reason (e.g., merge_conflict, behind_base)"
+    reason: str | None = typer.Option(
+        None,
+        "--reason",
+        help="Only fix PRs with this blocking reason (e.g., merge_conflict, behind_base)",
     ),
-    workdir: Optional[str] = typer.Option(
-        None, "--workdir", help="Base directory for workspaces (defaults to a secure temp dir)"
+    workdir: str | None = typer.Option(
+        None,
+        "--workdir",
+        help="Base directory for workspaces (defaults to a secure temp dir)",
     ),
     keep_temp: bool = typer.Option(
-        False, "--keep-temp", help="Keep the temporary workspace for inspection after completion"
+        False,
+        "--keep-temp",
+        help="Keep the temporary workspace for inspection after completion",
     ),
     prefetch: int = typer.Option(
         6, "--prefetch", help="Number of repositories to prepare in parallel"
     ),
-    editor: Optional[str] = typer.Option(
-        None, "--editor", help="Editor command to use for resolving conflicts (defaults to $VISUAL or $EDITOR)"
+    editor: str | None = typer.Option(
+        None,
+        "--editor",
+        help="Editor command to use for resolving conflicts (defaults to $VISUAL or $EDITOR)",
     ),
     mergetool: bool = typer.Option(
-        False, "--mergetool", help="Use 'git mergetool' for resolving conflicts when available"
+        False,
+        "--mergetool",
+        help="Use 'git mergetool' for resolving conflicts when available",
     ),
     interactive: bool = typer.Option(
-        True, "--interactive/--no-interactive", help="Attach rebase to the terminal for interactive resolution"
+        True,
+        "--interactive/--no-interactive",
+        help="Attach rebase to the terminal for interactive resolution",
     ),
     show_progress: bool = typer.Option(
         True, "--progress/--no-progress", help="Show real-time progress updates"
     ),
 ):
     """
-    Find blocked pull requests in a GitHub organization.
+    Reports blocked pull requests in a GitHub organization.
 
     This command will:
     1. Check all repositories in the organization
@@ -614,12 +572,14 @@ def blocked(
 
             # Show scan summary
             summary = progress_tracker.get_summary()
-            elapsed_time = summary.get('elapsed_time')
-            total_prs_analyzed = summary.get('total_prs_analyzed')
-            completed_repositories = summary.get('completed_repositories')
-            errors_count = summary.get('errors_count', 0)
+            elapsed_time = summary.get("elapsed_time")
+            total_prs_analyzed = summary.get("total_prs_analyzed")
+            completed_repositories = summary.get("completed_repositories")
+            errors_count = summary.get("errors_count", 0)
             console.print(f"✅ Check completed in {elapsed_time}")
-            console.print(f"📊 Analyzed {total_prs_analyzed} PRs across {completed_repositories} repositories")
+            console.print(
+                f"📊 Analyzed {total_prs_analyzed} PRs across {completed_repositories} repositories"
+            )
             if errors_count > 0:
                 console.print(f"⚠️  {errors_count} errors encountered during check")
             console.print()  # Add blank line before results
@@ -631,13 +591,17 @@ def blocked(
         if fix:
             # Build candidate list based on reasons
             allowed_default = {"merge_conflict", "behind_base"}
-            reasons_to_attempt = allowed_default if not reason else {reason.strip().lower()}
+            reasons_to_attempt = (
+                allowed_default if not reason else {reason.strip().lower()}
+            )
 
-            selections: List[PRSelection] = []
+            selections: list[PRSelection] = []
             for pr in scan_result.unmergeable_prs:
                 pr_reason_types = {r.type for r in pr.reasons}
                 if pr_reason_types & reasons_to_attempt:
-                    selections.append(PRSelection(repository=pr.repository, pr_number=pr.pr_number))
+                    selections.append(
+                        PRSelection(repository=pr.repository, pr_number=pr.pr_number)
+                    )
 
             if limit is not None and limit > 0:
                 selections = selections[:limit]
@@ -648,12 +612,18 @@ def blocked(
 
             token_to_use = token or os.getenv("GITHUB_TOKEN")
             if not token_to_use:
-                console.print("A GitHub token is required for --fix. Provide --token or set GITHUB_TOKEN.")
+                console.print(
+                    "A GitHub token is required for --fix. Provide --token or set GITHUB_TOKEN."
+                )
                 raise typer.Exit(1)
 
             console.print(f"Starting interactive fix for {len(selections)} PR(s)...")
             try:
-                orchestrator = FixOrchestrator(token_to_use, progress_tracker=progress_tracker, logger=lambda m: console.print(m))
+                orchestrator = FixOrchestrator(
+                    token_to_use,
+                    progress_tracker=progress_tracker,
+                    logger=lambda m: console.print(m),
+                )
                 fix_options = FixOptions(
                     workdir=workdir,
                     keep_temp=keep_temp,
@@ -665,16 +635,23 @@ def blocked(
                 )
                 results = orchestrator.run(selections, fix_options)
                 success_count = sum(1 for r in results if r.success)
-                console.print(f"✅ Fix complete: {success_count}/{len(selections)} succeeded")
+                console.print(
+                    f"✅ Fix complete: {success_count}/{len(selections)} succeeded"
+                )
             except Exception as e:
                 console.print(f"Error during fix workflow: {e}")
                 raise typer.Exit(1) from e
 
-    except Exception as e:
-        # Ensure progress tracker is stopped even if check fails
+    except typer.Exit as e:
+        # Handle typer exits gracefully
         if progress_tracker:
             progress_tracker.stop()
-        console.print(f"Error: {e}")
+        raise e
+    except Exception as e:
+        # Ensure progress tracker is stopped even if an error occurs
+        if progress_tracker:
+            progress_tracker.stop()
+        console.print(f"❌ Unexpected error: {e}")
         raise typer.Exit(1) from e
 
 
@@ -683,6 +660,7 @@ def _display_blocked_results(scan_result, output_format: str):
 
     if output_format == "json":
         import json
+
         console.print(json.dumps(scan_result.dict(), indent=2, default=str))
         return
 
@@ -700,7 +678,9 @@ def _display_blocked_results(scan_result, output_format: str):
     pr_table.add_column("Blocking Reasons", style="yellow")
 
     # Only show Copilot column if there are any copilot comments
-    show_copilot_col = any(p.copilot_comments_count > 0 for p in scan_result.unmergeable_prs)
+    show_copilot_col = any(
+        p.copilot_comments_count > 0 for p in scan_result.unmergeable_prs
+    )
     if show_copilot_col:
         pr_table.add_column("Copilot", style="blue")
 
@@ -713,7 +693,7 @@ def _display_blocked_results(scan_result, output_format: str):
             f"#{pr.pr_number}",
             pr.title,
             pr.author,
-            reasons_text
+            reasons_text,
         ]
 
         # Add Copilot count if column is shown
