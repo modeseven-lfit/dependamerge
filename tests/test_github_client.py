@@ -104,8 +104,16 @@ class TestGitHubClient:
             "status": "modified",
         }
 
-        # Mock the async get method
-        mock_async.get = AsyncMock(return_value=pr_data)
+        # Mock different responses for different API calls
+        def mock_get_side_effect(url):
+            if url == "/repos/owner/repo/pulls/22":
+                return pr_data
+            elif url == "/repos/owner/repo/pulls/22/reviews":
+                return []  # Empty reviews list
+            else:
+                return {}
+
+        mock_async.get = AsyncMock(side_effect=mock_get_side_effect)
 
         # Create proper async iterator mock
         class MockAsyncIterator:
@@ -141,8 +149,10 @@ class TestGitHubClient:
         assert len(pr_info.files_changed) == 1
         assert pr_info.files_changed[0].filename == "requirements.txt"
 
-        # Verify async methods were called properly
-        mock_async.get.assert_called_once_with("/repos/owner/repo/pulls/22")
+        # Verify async methods were called properly (PR info and reviews)
+        assert mock_async.get.call_count == 2
+        mock_async.get.assert_any_call("/repos/owner/repo/pulls/22")
+        mock_async.get.assert_any_call("/repos/owner/repo/pulls/22/reviews")
         mock_async.get_paginated.assert_called_once_with(
             "/repos/owner/repo/pulls/22/files", per_page=100
         )
@@ -387,6 +397,7 @@ class TestGitHubClient:
         mock_async.get = AsyncMock(
             side_effect=[
                 [],  # reviews response (no approvals)
+                [],  # comments response (no comments)
                 {  # check runs response
                     "check_runs": [{"conclusion": "failure", "name": "CI Tests"}]
                 },
@@ -414,7 +425,188 @@ class TestGitHubClient:
         )
 
         reason = client._analyze_block_reason(pr_info)
-        assert "failing checks" in reason.lower()
+        assert "failing check" in reason.lower()
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_analyze_block_reason_copilot_reviews(self, mock_async_class):
+        """Test analyzing block reason with Copilot reviews requesting changes."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # Mock responses
+        mock_async.get = AsyncMock(
+            side_effect=[
+                [  # reviews response with Copilot changes requested
+                    {
+                        "state": "CHANGES_REQUESTED",
+                        "user": {"login": "github-copilot[bot]"},
+                    },
+                    {"state": "APPROVED", "user": {"login": "human-reviewer"}},
+                ],
+                [],  # comments response (no comments)
+                {"check_runs": []},  # check runs response (no failing checks)
+            ]
+        )
+
+        client = GitHubClient(token="test_token")
+
+        pr_info = PullRequestInfo(
+            number=23,
+            title="Test PR with Copilot Review",
+            body="Test body",
+            author="user",
+            head_sha="def456",
+            base_branch="main",
+            head_branch="feature",
+            state="open",
+            mergeable=True,
+            mergeable_state="blocked",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/23",
+        )
+
+        reason = client._analyze_block_reason(pr_info)
+        assert "copilot reviews" in reason.lower()
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_analyze_block_reason_copilot_comments(self, mock_async_class):
+        """Test analyzing block reason with unresolved Copilot comments."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # Mock responses
+        mock_async.get = AsyncMock(
+            side_effect=[
+                [  # reviews response with approval
+                    {"state": "APPROVED", "user": {"login": "human-reviewer"}}
+                ],
+                [  # comments response with unresolved Copilot comments
+                    {
+                        "user": {"login": "github-copilot[bot]"},
+                        "body": "This code could be improved",
+                    },
+                    {
+                        "user": {"login": "github-copilot[bot]"},
+                        "body": "Consider using a different approach",
+                    },
+                ],
+                {"check_runs": []},  # check runs response (no failing checks)
+            ]
+        )
+
+        client = GitHubClient(token="test_token")
+
+        pr_info = PullRequestInfo(
+            number=24,
+            title="Test PR with Copilot Comments",
+            body="Test body",
+            author="user",
+            head_sha="ghi789",
+            base_branch="main",
+            head_branch="feature",
+            state="open",
+            mergeable=True,
+            mergeable_state="blocked",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/24",
+        )
+
+        reason = client._analyze_block_reason(pr_info)
+        assert "copilot comments" in reason.lower()
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_analyze_block_reason_human_changes_requested(self, mock_async_class):
+        """Test analyzing block reason with human reviewer requesting changes."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # Mock responses
+        mock_async.get = AsyncMock(
+            side_effect=[
+                [  # reviews response with human changes requested
+                    {"state": "CHANGES_REQUESTED", "user": {"login": "human-reviewer"}},
+                ],
+                [],  # comments response (no comments)
+                {"check_runs": []},  # check runs response (no failing checks)
+            ]
+        )
+
+        client = GitHubClient(token="test_token")
+
+        pr_info = PullRequestInfo(
+            number=25,
+            title="Test PR with Human Changes Requested",
+            body="Test body",
+            author="user",
+            head_sha="jkl012",
+            base_branch="main",
+            head_branch="feature",
+            state="open",
+            mergeable=True,
+            mergeable_state="blocked",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/25",
+        )
+
+        reason = client._analyze_block_reason(pr_info)
+        assert "human reviewer requested changes" in reason.lower()
+
+    @patch("dependamerge.github_async.GitHubAsync")
+    def test_analyze_block_reason_multiple_failing_checks(self, mock_async_class):
+        """Test analyzing block reason with multiple failing checks."""
+        # Setup async mocks properly
+        mock_async = AsyncMock()
+        mock_async_class.return_value.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # Mock responses
+        mock_async.get = AsyncMock(
+            side_effect=[
+                [],  # reviews response (no reviews)
+                [],  # comments response (no comments)
+                {  # check runs response with multiple failures
+                    "check_runs": [
+                        {"conclusion": "failure", "name": "CI Tests"},
+                        {"conclusion": "failure", "name": "Security Scan"},
+                        {"conclusion": "success", "name": "Build"},
+                    ]
+                },
+            ]
+        )
+
+        client = GitHubClient(token="test_token")
+
+        pr_info = PullRequestInfo(
+            number=26,
+            title="Test PR with Multiple Failing Checks",
+            body="Test body",
+            author="user",
+            head_sha="mno345",
+            base_branch="main",
+            head_branch="feature",
+            state="open",
+            mergeable=True,
+            mergeable_state="blocked",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/26",
+        )
+
+        reason = client._analyze_block_reason(pr_info)
+        assert "blocked by 2 failing checks" in reason.lower()
 
     def test_should_attempt_merge_logic(self):
         """Test the _should_attempt_merge logic with different PR states."""

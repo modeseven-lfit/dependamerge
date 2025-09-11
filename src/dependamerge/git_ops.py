@@ -23,11 +23,10 @@ import shlex
 import shutil
 import stat
 import subprocess
-
 import tempfile
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Sequence, Tuple, Union
 
 # Public API
 __all__ = [
@@ -54,16 +53,14 @@ __all__ = [
 ]
 
 # Type aliases
-PathLike = Union[str, Path]
+PathLike = str | Path
 
 # Token redaction patterns
-# - GitHub classic tokens: ghp_xxx
-# - GitHub fine-grained/pat: github_pat_xxx
+# - GitHub tokens: ghp_xxx
 # - Basic auth in URL: http[s]://user:password@host
 # - x-access-token inline in URL: x-access-token:<token>@
 _TOKEN_PATTERNS = [
     re.compile(r"ghp_[A-Za-z0-9]{20,}", re.IGNORECASE),
-    re.compile(r"github_pat_[A-Za-z0-9_]{50,}", re.IGNORECASE),
     re.compile(r"glpat-[A-Za-z0-9_-]{20,}", re.IGNORECASE),  # GitLab
     # JWT-like long tokens (best-effort)
     re.compile(r"[A-Za-z0-9-_]{20,}\.[A-Za-z0-9-_]{20,}\.[A-Za-z0-9-_]{10,}"),
@@ -93,7 +90,7 @@ def _redact_seq(parts: Sequence[str]) -> Sequence[str]:
     return [(_redact(p) if isinstance(p, str) else p) for p in parts]
 
 
-def _build_git_env(env_overrides: Optional[dict] = None, *, lfs_skip: bool = True) -> dict:
+def _build_git_env(env_overrides: dict | None = None, *, lfs_skip: bool = True) -> dict:
     """Build a safe environment for git invocations."""
     env = os.environ.copy()
 
@@ -115,20 +112,31 @@ def _build_git_env(env_overrides: Optional[dict] = None, *, lfs_skip: bool = Tru
 @dataclass
 class GitResult:
     """Result of a git command execution."""
+
     returncode: int
     stdout: str
     stderr: str
-    args: Tuple[str, ...]
+    args: tuple[str, ...]
 
 
 class GitError(RuntimeError):
     """Raised when a git command fails with non-zero exit code."""
 
-    def __init__(self, message: str, *, args: Sequence[str], returncode: int, stdout: str, stderr: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        args: Sequence[str],
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> None:
         redacted_cmd = _redact(" ".join(args))
         redacted_out = _redact(stdout or "")
         redacted_err = _redact(stderr or "")
-        super().__init__(f"{message}\n  cmd: {redacted_cmd}\n  exit: {returncode}\n  stderr: {redacted_err.strip()}")
+        super().__init__(
+            f"{message}\n  cmd: {redacted_cmd}\n  exit: {returncode}\n  stderr: {redacted_err.strip()}"
+        )
         self.args_vec = tuple(args)
         self.returncode = returncode
         self.stdout = redacted_out
@@ -140,8 +148,7 @@ def ensure_git_available() -> None:
     try:
         result = subprocess.run(
             ["git", "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             check=False,
         )
@@ -166,12 +173,12 @@ def ensure_git_available() -> None:
 def run_git(
     args: Sequence[str],
     *,
-    cwd: Optional[PathLike] = None,
-    env_overrides: Optional[dict] = None,
+    cwd: PathLike | None = None,
+    env_overrides: dict | None = None,
     interactive: bool = False,
     check: bool = True,
-    timeout: Optional[float] = None,
-    logger: Optional[Callable[[str], None]] = None,
+    timeout: float | None = None,
+    logger: Callable[[str], None] | None = None,
     lfs_skip: bool = True,
 ) -> GitResult:
     """
@@ -219,8 +226,7 @@ def run_git(
                 list(args),
                 cwd=str(cwd) if cwd is not None else None,
                 env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 check=False,
                 timeout=timeout,
@@ -259,17 +265,18 @@ def run_git(
 # High-level git helper methods
 # -----------------------------
 
+
 def clone(
     url: str,
     dest: PathLike,
     *,
-    branch: Optional[str] = None,
-    depth: Optional[int] = 50,
+    branch: str | None = None,
+    depth: int | None = 50,
     single_branch: bool = True,
     no_tags: bool = True,
     filter_blobs: bool = True,
     quiet: bool = True,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> None:
     """Clone a repository with defaults optimized for speed and safety."""
     args = ["git", "clone"]
@@ -295,20 +302,20 @@ def add_remote(
     url: str,
     *,
     cwd: PathLike,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> None:
     run_git(["git", "remote", "add", name, url], cwd=cwd, logger=logger)
 
 
 def fetch(
     remote: str,
-    refspecs: Union[str, Sequence[str]] = (),
+    refspecs: str | Sequence[str] = (),
     *,
     cwd: PathLike,
-    depth: Optional[int] = None,
+    depth: int | None = None,
     unshallow: bool = False,
     prune: bool = False,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> None:
     """Fetch refs with optional shallow/unshallow behavior."""
     args = ["git", "fetch", remote]
@@ -331,8 +338,8 @@ def checkout(
     *,
     cwd: PathLike,
     create: bool = False,
-    track: Optional[str] = None,
-    logger: Optional[Callable[[str], None]] = None,
+    track: str | None = None,
+    logger: Callable[[str], None] | None = None,
 ) -> None:
     """Checkout a branch; optionally create and set upstream."""
     args = ["git", "checkout"]
@@ -341,7 +348,11 @@ def checkout(
     args.append(branch)
     run_git(args, cwd=cwd, logger=logger)
     if track:
-        run_git(["git", "branch", "--set-upstream-to", track, branch], cwd=cwd, logger=logger)
+        run_git(
+            ["git", "branch", "--set-upstream-to", track, branch],
+            cwd=cwd,
+            logger=logger,
+        )
 
 
 def rebase(
@@ -350,7 +361,7 @@ def rebase(
     cwd: PathLike,
     autostash: bool = True,
     interactive: bool = False,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> GitResult:
     """
     Start a rebase onto the provided branch/ref.
@@ -368,15 +379,21 @@ def rebase_continue(
     *,
     cwd: PathLike,
     interactive: bool = False,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> GitResult:
-    return run_git(["git", "rebase", "--continue"], cwd=cwd, interactive=interactive, check=False, logger=logger)
+    return run_git(
+        ["git", "rebase", "--continue"],
+        cwd=cwd,
+        interactive=interactive,
+        check=False,
+        logger=logger,
+    )
 
 
 def rebase_abort(
     *,
     cwd: PathLike,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> None:
     run_git(["git", "rebase", "--abort"], cwd=cwd, logger=logger)
 
@@ -384,7 +401,7 @@ def rebase_abort(
 def status_porcelain(
     *,
     cwd: PathLike,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> str:
     """Return porcelain status output."""
     res = run_git(["git", "status", "--porcelain"], cwd=cwd, check=True, logger=logger)
@@ -394,7 +411,7 @@ def status_porcelain(
 def list_conflicted_files(
     *,
     cwd: PathLike,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> list[str]:
     """
     Parse 'git status --porcelain' to list conflicted files.
@@ -415,10 +432,10 @@ def list_conflicted_files(
 
 
 def add(
-    paths: Union[str, Sequence[str]],
+    paths: str | Sequence[str],
     *,
     cwd: PathLike,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> None:
     if isinstance(paths, str):
         args = ["git", "add", "--", paths]
@@ -430,7 +447,7 @@ def add(
 def add_all(
     *,
     cwd: PathLike,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> None:
     run_git(["git", "add", "-A"], cwd=cwd, logger=logger)
 
@@ -439,7 +456,7 @@ def commit_amend_no_edit(
     *,
     cwd: PathLike,
     no_verify: bool = False,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> None:
     args = ["git", "commit", "--amend", "--no-edit"]
     if no_verify:
@@ -453,7 +470,7 @@ def push_force_with_lease(
     dst_ref: str,
     *,
     cwd: PathLike,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> None:
     run_git(
         ["git", "push", "--force-with-lease", remote, f"{src_ref}:{dst_ref}"],
@@ -466,7 +483,7 @@ def rev_list_count(
     range_expr: str,
     *,
     cwd: PathLike,
-    logger: Optional[Callable[[str], None]] = None,
+    logger: Callable[[str], None] | None = None,
 ) -> int:
     """Return the number of commits in the given revision range (e.g., 'base..HEAD')."""
     res = run_git(["git", "rev-list", "--count", range_expr], cwd=cwd, logger=logger)
@@ -479,6 +496,7 @@ def rev_list_count(
 # --------------------------------------
 # Secure temporary directory helpers
 # --------------------------------------
+
 
 def create_secure_tempdir(prefix: str = "dependamerge-") -> str:
     """
@@ -496,7 +514,9 @@ def create_secure_tempdir(prefix: str = "dependamerge-") -> str:
     return path
 
 
-def _chmod_tree_safe(path: PathLike, file_mode: int = 0o600, dir_mode: int = 0o700) -> None:
+def _chmod_tree_safe(
+    path: PathLike, file_mode: int = 0o600, dir_mode: int = 0o700
+) -> None:
     """Best-effort to ensure paths are writable/removable by adjusting modes."""
     try:
         p = Path(path)
