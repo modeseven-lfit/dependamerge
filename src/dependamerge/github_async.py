@@ -8,7 +8,10 @@ import json
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, Union, AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import (
+    Any,
+)
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -88,7 +91,9 @@ def _is_retryable_status(status: int) -> bool:
     return status in (429, 502, 503, 504)
 
 
-async def _maybe_await(cb: Optional[Callable[..., Union[None, Awaitable[None]]]], *args, **kwargs) -> None:
+async def _maybe_await(
+    cb: Callable[..., None | Awaitable[None]] | None, *args, **kwargs
+) -> None:
     if cb is None:
         return
     result = cb(*args, **kwargs)
@@ -108,7 +113,7 @@ class GitHubAsync:
 
     def __init__(
         self,
-        token: Optional[str] = None,
+        token: str | None = None,
         *,
         api_url: str = GITHUB_API,
         graphql_url: str = GITHUB_GQL,
@@ -116,12 +121,12 @@ class GitHubAsync:
         requests_per_second: float = 8.0,
         timeout: float = 20.0,
         user_agent: str = "dependamerge/async-client",
-        verify: Union[bool, str] = True,
-        proxies: Optional[Dict[str, str]] = None,
-        logger: Optional[logging.Logger] = None,
-        on_rate_limited: Optional[Callable[[float], Union[None, Awaitable[None]]]] = None,
-        on_rate_limit_cleared: Optional[Callable[[], Union[None, Awaitable[None]]]] = None,
-        on_metrics: Optional[Callable[[int, float], Union[None, Awaitable[None]]]] = None,
+        verify: bool | str = True,
+        proxies: dict[str, str] | None = None,
+        logger: logging.Logger | None = None,
+        on_rate_limited: Callable[[float], None | Awaitable[None]] | None = None,
+        on_rate_limit_cleared: Callable[[], None | Awaitable[None]] | None = None,
+        on_metrics: Callable[[int, float], None | Awaitable[None]] | None = None,
     ):
         """
         Initialize the async client.
@@ -159,11 +164,13 @@ class GitHubAsync:
         self.on_metrics = on_metrics
 
         # Error tracking for adaptive throttling
-        self._error_history: list[tuple[float, str]] = []  # List of (timestamp, error_type) tuples
+        self._error_history: list[
+            tuple[float, str]
+        ] = []  # List of (timestamp, error_type) tuples
         self._error_window = 300  # 5 minutes
-        self._last_retry_after: Optional[float] = None
+        self._last_retry_after: float | None = None
         self._adaptive_delay = 0.0
-        self._last_adaptive_update: Optional[float] = None
+        self._last_adaptive_update: float | None = None
 
         mounts = None
         if proxies:
@@ -184,7 +191,7 @@ class GitHubAsync:
             mounts=mounts,
         )
 
-    async def __aenter__(self) -> "GitHubAsync":
+    async def __aenter__(self) -> GitHubAsync:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -198,7 +205,9 @@ class GitHubAsync:
     # Core request functionality
     # --------------------------
 
-    def _parse_rate_limit_headers(self, r: httpx.Response) -> Tuple[int, int, Optional[float]]:
+    def _parse_rate_limit_headers(
+        self, r: httpx.Response
+    ) -> tuple[int, int, float | None]:
         """
         Parse GitHub rate limit headers.
 
@@ -226,7 +235,12 @@ class GitHubAsync:
         stop=stop_after_attempt(6),
         wait=wait_random_exponential(multiplier=0.5, max=10.0),
         retry=retry_if_exception_type(
-            (httpx.TransportError, httpx.ReadTimeout, RetryableError, SecondaryRateLimitError)
+            (
+                httpx.TransportError,
+                httpx.ReadTimeout,
+                RetryableError,
+                SecondaryRateLimitError,
+            )
         ),
     )
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
@@ -265,12 +279,16 @@ class GitHubAsync:
                         self._apply_retry_after_throttling(delay)
                     except Exception:
                         delay = 5.0
-                    self.log.warning("Secondary rate limit hit. Sleeping for %ss", delay)
+                    self.log.warning(
+                        "Secondary rate limit hit. Sleeping for %ss", delay
+                    )
                     await asyncio.sleep(max(0.0, delay))
                 else:
                     # Fallback wait when no explicit Retry-After
                     delay = 10.0
-                    self.log.warning("Secondary rate limit hit. Sleeping fallback %ss", delay)
+                    self.log.warning(
+                        "Secondary rate limit hit. Sleeping fallback %ss", delay
+                    )
                     await asyncio.sleep(delay)
 
                 # Track error for adaptive throttling
@@ -285,17 +303,24 @@ class GitHubAsync:
                     try:
                         delay = float(retry_after)
                         self._last_retry_after = delay
-                        self.log.warning("Primary rate limit with Retry-After: %ss", delay)
+                        self.log.warning(
+                            "Primary rate limit with Retry-After: %ss", delay
+                        )
                         await asyncio.sleep(max(0.0, delay))
                         self._apply_retry_after_throttling(delay)
                     except Exception:
                         pass
                 elif reset_epoch:
-                    self.log.warning("Primary rate limit exhausted. Waiting until reset: %s", reset_epoch)
+                    self.log.warning(
+                        "Primary rate limit exhausted. Waiting until reset: %s",
+                        reset_epoch,
+                    )
                     await self._sleep_until(reset_epoch)
                 else:
                     # If no reset header, backoff and retry
-                    self.log.warning("Primary rate limit suspected without reset header; backing off")
+                    self.log.warning(
+                        "Primary rate limit suspected without reset header; backing off"
+                    )
                     await asyncio.sleep(5.0)
 
                 # Track error for adaptive throttling
@@ -310,7 +335,9 @@ class GitHubAsync:
                 try:
                     delay = float(retry_after)
                     self._last_retry_after = delay
-                    self.log.debug("HTTP %s with Retry-After: %ss", r.status_code, delay)
+                    self.log.debug(
+                        "HTTP %s with Retry-After: %ss", r.status_code, delay
+                    )
                     await asyncio.sleep(max(0.0, delay))
                     self._apply_retry_after_throttling(delay)
                 except Exception:
@@ -340,7 +367,9 @@ class GitHubAsync:
                 if should_throttle:
                     # Reduce concurrency but keep a floor of 2
                     throttle_factor = 0.3 if error_rate > 0.2 else 0.5
-                    new_concurrency = max(2, int(self._max_concurrency * throttle_factor))
+                    new_concurrency = max(
+                        2, int(self._max_concurrency * throttle_factor)
+                    )
                     if new_concurrency != self._max_concurrency:
                         self._max_concurrency = new_concurrency
                         self.semaphore = asyncio.Semaphore(self._max_concurrency)
@@ -349,7 +378,9 @@ class GitHubAsync:
                     new_rps = max(1.0, self._current_rps * throttle_factor)
                     if abs(new_rps - self._current_rps) >= 0.5:
                         self._current_rps = new_rps
-                        self.limiter = AsyncLimiter(max_rate=self._current_rps, time_period=1.0)
+                        self.limiter = AsyncLimiter(
+                            max_rate=self._current_rps, time_period=1.0
+                        )
             else:
                 # Gradually increase limits when healthy, up to configured base values
                 if self._max_concurrency < 20:
@@ -357,13 +388,19 @@ class GitHubAsync:
                     self.semaphore = asyncio.Semaphore(self._max_concurrency)
                 if self._current_rps < self._base_rps:
                     self._current_rps = min(self._base_rps, self._current_rps + 1.0)
-                    self.limiter = AsyncLimiter(max_rate=self._current_rps, time_period=1.0)
+                    self.limiter = AsyncLimiter(
+                        max_rate=self._current_rps, time_period=1.0
+                    )
         except Exception:
             # Tuning is best-effort; never fail the request on tuning errors
             pass
         # Push current metrics to progress tracker (if provided)
         try:
-            await _maybe_await(getattr(self, "on_metrics", None), self._max_concurrency, float(self._current_rps))
+            await _maybe_await(
+                getattr(self, "on_metrics", None),
+                self._max_concurrency,
+                float(self._current_rps),
+            )
         except Exception:
             # Metrics reporting is best-effort
             pass
@@ -373,23 +410,31 @@ class GitHubAsync:
     # Public helpers
     # -------------
 
-    async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def get(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         r = await self._request("GET", f"{self.api_url}{path}", params=params)
         return r.json()  # type: ignore[no-any-return]
 
-    async def post(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def post(
+        self, path: str, json: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         r = await self._request("POST", f"{self.api_url}{path}", json=json)
         if r.status_code == 204:
             return {}
         return r.json()  # type: ignore[no-any-return]
 
-    async def put(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def put(
+        self, path: str, json: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         r = await self._request("PUT", f"{self.api_url}{path}", json=json)
         if r.status_code == 204:
             return {}
         return r.json()  # type: ignore[no-any-return]
 
-    async def graphql(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def graphql(
+        self, query: str, variables: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """
         Execute a GraphQL query with retry for transient GraphQL errors.
 
@@ -402,7 +447,9 @@ class GitHubAsync:
             reraise=True,
             stop=stop_after_attempt(5),
             wait=wait_random_exponential(multiplier=0.5, max=10.0),
-            retry=retry_if_exception_type((RetryableError, httpx.TransportError, httpx.ReadTimeout)),
+            retry=retry_if_exception_type(
+                (RetryableError, httpx.TransportError, httpx.ReadTimeout)
+            ),
         ):
             with attempt:
                 r = await self._request("POST", self.graphql_url, json=payload)
@@ -410,7 +457,10 @@ class GitHubAsync:
                 if "errors" in data and data["errors"]:
                     # Retry on transient errors, otherwise raise
                     if _is_transient_graphql_error(data["errors"]):
-                        self.log.debug("Transient GraphQL error encountered; retrying: %s", data["errors"])
+                        self.log.debug(
+                            "Transient GraphQL error encountered; retrying: %s",
+                            data["errors"],
+                        )
                         raise RetryableError("Transient GraphQL error")
                     # Non-transient; raise detailed error
                     raise GraphQLError(json.dumps(data["errors"]))
@@ -427,7 +477,9 @@ class GitHubAsync:
     # GitHub operation helpers
     # -----------------------
 
-    async def approve_pull_request(self, owner: str, repo: str, number: int, body: str) -> None:
+    async def approve_pull_request(
+        self, owner: str, repo: str, number: int, body: str
+    ) -> None:
         """
         Approve a pull request.
 
@@ -438,22 +490,116 @@ class GitHubAsync:
             json={"event": "APPROVE", "body": body},
         )
 
-    async def merge_pull_request(self, owner: str, repo: str, number: int, merge_method: str = "merge") -> bool:
+    async def merge_pull_request(
+        self, owner: str, repo: str, number: int, merge_method: str = "merge"
+    ) -> bool:
         """
         Merge a pull request.
 
         REST: PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge
         """
-        data = await self.put(
-            f"/repos/{owner}/{repo}/pulls/{number}/merge",
-            json={"merge_method": merge_method},
-        )
-        # The API returns {"merged": true/false, ...}
-        return bool(data.get("merged", False))
+        try:
+            data = await self.put(
+                f"/repos/{owner}/{repo}/pulls/{number}/merge",
+                json={"merge_method": merge_method},
+            )
+            # The API returns {"merged": true/false, ...}
+            return bool(data.get("merged", False))
+        except Exception as e:
+            # Get PR details to check if the merge actually succeeded despite the exception
+            try:
+                pr_data_response = await self.get(
+                    f"/repos/{owner}/{repo}/pulls/{number}"
+                )
+                # PR data should always be a dict, not a list
+                pr_data = pr_data_response if isinstance(pr_data_response, dict) else {}
+
+                # Extract relevant state information
+                mergeable = pr_data.get("mergeable")
+                mergeable_state = pr_data.get("mergeable_state")
+                state = pr_data.get("state")
+                merged = pr_data.get("merged", False)
+                draft = pr_data.get("draft", False)
+
+                # Check if the merge actually succeeded despite the exception
+                # This handles race conditions where the API succeeds but we get an exception
+                # due to rate limiting, network issues, JSON parsing, etc.
+                if state == "closed" and merged:
+                    self.log.info(
+                        f"PR #{number} in {owner}/{repo} was successfully merged despite exception: {e}"
+                    )
+                    return True
+
+                # Enhanced error message with PR state context
+                error_msg = (
+                    f"Failed to merge PR #{number} in {owner}/{repo}. "
+                    f"PR state: {state}, mergeable: {mergeable}, mergeable_state: {mergeable_state}. "
+                    f"Error: {str(e)}"
+                )
+
+                # Check for common issues that cause 405 errors
+                if mergeable_state == "blocked":
+                    error_msg += " (Likely blocked by branch protection rules or required status checks)"
+                elif mergeable_state == "behind":
+                    error_msg += " (PR branch is behind base branch)"
+                elif mergeable_state == "dirty":
+                    error_msg += " (PR has merge conflicts)"
+                elif draft:
+                    error_msg += " (Cannot merge draft PR)"
+                elif state == "closed" and not merged:
+                    error_msg += " (PR was closed without merging)"
+                elif state != "open":
+                    error_msg += f" (PR is not open, state: {state})"
+
+                raise Exception(error_msg) from e
+            except Exception as inner_e:
+                # If we can't get PR details, just re-raise the original error
+                if isinstance(inner_e, Exception) and "Failed to merge PR" in str(
+                    inner_e
+                ):
+                    raise inner_e from e
+                else:
+                    raise e from inner_e
+
+    async def get_pull_request_review_comments(
+        self, owner: str, repo: str, number: int
+    ) -> list[dict[str, Any]]:
+        """
+        Get review comments for a pull request.
+
+        REST: GET /repos/{owner}/{repo}/pulls/{pull_number}/comments
+        """
+        try:
+            data = await self.get(f"/repos/{owner}/{repo}/pulls/{number}/comments")
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            # If we can't get review comments, return empty list
+            self.log.debug(f"Could not fetch review comments for PR {number}: {e}")
+            return []
+
+    async def get_branch_protection(
+        self, owner: str, repo: str, branch: str
+    ) -> dict[str, Any]:
+        """
+        Get branch protection rules for a branch.
+
+        REST: GET /repos/{owner}/{repo}/branches/{branch}/protection
+        """
+        try:
+            protection_data = await self.get(
+                f"/repos/{owner}/{repo}/branches/{branch}/protection"
+            )
+            # Branch protection data should always be a dict, not a list
+            return protection_data if isinstance(protection_data, dict) else {}
+        except Exception as e:
+            # Branch protection might not be enabled, return empty dict
+            if "404" in str(e):
+                return {}
+            raise
 
     async def update_branch(self, owner: str, repo: str, number: int) -> None:
         """
-        Update a PR branch with the base branch.
+        Update a pull request branch.
 
         REST: PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch
         """
@@ -467,10 +613,10 @@ class GitHubAsync:
         self,
         path: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: dict[str, Any] | None = None,
         per_page: int = 100,
-        max_pages: Optional[int] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
+        max_pages: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         """
         Iterate through a paginated REST collection.
 

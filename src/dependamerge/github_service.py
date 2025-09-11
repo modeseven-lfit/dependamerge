@@ -4,26 +4,29 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any
 
 from .github_async import GitHubAsync
-from .github_graphql import ORG_REPOS_ONLY, REPO_OPEN_PRS_PAGE
+from .github_graphql import GET_BRANCH_PROTECTION, ORG_REPOS_ONLY, REPO_OPEN_PRS_PAGE
 from .models import (
+    ComparisonResult,
     CopilotComment,
     FileChange,
     OrganizationScanResult,
     PullRequestInfo,
+    ReviewInfo,
     UnmergeablePR,
     UnmergeableReason,
-    ComparisonResult,
 )
 
 # GitHub API tuning defaults - optimized for performance and rate limit compliance
-DEFAULT_PRS_PAGE_SIZE = 30          # Pull requests per GraphQL page
-DEFAULT_FILES_PAGE_SIZE = 50        # Files per pull request
-DEFAULT_COMMENTS_PAGE_SIZE = 10     # Comments per pull request
-DEFAULT_CONTEXTS_PAGE_SIZE = 20     # Status contexts per pull request
+DEFAULT_PRS_PAGE_SIZE = 30  # Pull requests per GraphQL page
+DEFAULT_FILES_PAGE_SIZE = 50  # Files per pull request
+DEFAULT_COMMENTS_PAGE_SIZE = 10  # Comments per pull request
+DEFAULT_CONTEXTS_PAGE_SIZE = 20  # Status contexts per pull request
 
 
 class GitHubService:
@@ -41,9 +44,9 @@ class GitHubService:
 
     def __init__(
         self,
-        token: Optional[str] = None,
+        token: str | None = None,
         *,
-        progress_tracker: Optional[Any] = None,
+        progress_tracker: Any | None = None,
         max_repo_tasks: int = 8,
         max_page_tasks: int = 16,
         debug_matching: bool = False,
@@ -69,6 +72,9 @@ class GitHubService:
         # Rate limit awareness
         self._rate_limited = False
         self._debug_matching = debug_matching
+        # Cache for branch protection settings to avoid repeated API calls
+        self._branch_protection_cache: dict[str, dict[str, Any] | None] = {}
+        self.log = logging.getLogger(__name__)
 
     async def close(self) -> None:
         await self._api.aclose()
@@ -79,7 +85,7 @@ class GitHubService:
 
     async def _on_rate_limited(self, reset_epoch: float) -> None:
         # Mark rate-limited and report current tuning metrics
-        setattr(self, "_rate_limited", True)
+        self._rate_limited = True
         if self._progress:
             try:
                 reset_time = datetime.fromtimestamp(reset_epoch)
@@ -93,7 +99,7 @@ class GitHubService:
 
     async def _on_rate_limit_cleared(self) -> None:
         # Clear rate-limited flag and report current tuning metrics
-        setattr(self, "_rate_limited", False)
+        self._rate_limited = False
         if not self._progress:
             return
         try:
@@ -127,8 +133,8 @@ class GitHubService:
         Returns:
             OrganizationScanResult with aggregated data and errors.
         """
-        errors: List[str] = []
-        unmergeable_prs: List[UnmergeablePR] = []
+        errors: list[str] = []
+        unmergeable_prs: list[UnmergeablePR] = []
         total_repositories = 0
         scanned_repositories = 0
         total_prs = 0
@@ -139,36 +145,45 @@ class GitHubService:
             self._progress.update_total_repositories(total_repositories)
 
         # Second pass: process repositories with bounded parallelism
-        async def process_repo(repo_node: Dict[str, Any]) -> Tuple[List[UnmergeablePR], int, int, List[str]]:
+        async def process_repo(
+            repo_node: dict[str, Any],
+        ) -> tuple[list[UnmergeablePR], int, int, list[str]]:
             async with self._repo_semaphore:
-                repo_errors: List[str] = []
+                repo_errors: list[str] = []
                 repo_full_name = repo_node.get("nameWithOwner", "unknown/unknown")
                 if self._progress:
                     self._progress.start_repository(repo_full_name)
                 try:
                     owner, name = self._split_owner_repo(repo_full_name)
-                    first_nodes, page_info = await self._fetch_repo_prs_first_page(owner, name)
-                    prs_nodes: List[Dict[str, Any]] = list(first_nodes)
+                    first_nodes, page_info = await self._fetch_repo_prs_first_page(
+                        owner, name
+                    )
+                    prs_nodes: list[dict[str, Any]] = list(first_nodes)
                     has_next = bool(page_info.get("hasNextPage"))
                     end_cursor = page_info.get("endCursor")
 
                     # Include additional pages of PRs if present
                     if has_next:
-                        async for pr_node in self._iter_repo_open_prs_pages(owner, name, end_cursor):
+                        async for pr_node in self._iter_repo_open_prs_pages(
+                            owner, name, end_cursor
+                        ):
                             prs_nodes.append(pr_node)
 
                     repo_total_prs = len(prs_nodes)
 
                     # Analyze PRs concurrently within this repository
                     tasks = [
-                        self._analyze_pr_node(repo_full_name, pr_node) for pr_node in prs_nodes
+                        self._analyze_pr_node(repo_full_name, pr_node)
+                        for pr_node in prs_nodes
                     ]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    repo_unmergeables: List[UnmergeablePR] = []
+                    repo_unmergeables: list[UnmergeablePR] = []
                     for r in results:
                         if isinstance(r, Exception):
-                            repo_errors.append(f"Error analyzing PR in {repo_full_name}: {r}")
+                            repo_errors.append(
+                                f"Error analyzing PR in {repo_full_name}: {r}"
+                            )
                             if self._progress:
                                 self._progress.add_error()
                             continue
@@ -184,9 +199,14 @@ class GitHubService:
                     if self._progress:
                         self._progress.add_error()
                     # Return no unmergeables, no prs counted, no scanned increment, but record error
-                    return [], 0, 0, [f"Error scanning repository {repo_full_name}: {e}"]
+                    return (
+                        [],
+                        0,
+                        0,
+                        [f"Error scanning repository {repo_full_name}: {e}"],
+                    )
 
-        tasks: List[asyncio.Task] = []
+        tasks: list[asyncio.Task] = []
         async for repo in self._iter_org_repositories_with_open_prs(org):
             tasks.append(asyncio.create_task(process_repo(repo)))
 
@@ -216,11 +236,13 @@ class GitHubService:
     async def _count_org_repositories(self, org: str) -> int:
         """Count repositories using a lightweight query that does not fetch PR nodes."""
         count = 0
-        cursor: Optional[str] = None
+        cursor: str | None = None
         while True:
-            data = await self._api.graphql(ORG_REPOS_ONLY, {"org": org, "reposCursor": cursor})
+            data = await self._api.graphql(
+                ORG_REPOS_ONLY, {"org": org, "reposCursor": cursor}
+            )
             repos = ((data or {}).get("organization") or {}).get("repositories") or {}
-            nodes: List[Dict[str, Any]] = repos.get("nodes", []) or []
+            nodes: list[dict[str, Any]] = repos.get("nodes", []) or []
             for repo in nodes:
                 if repo.get("isArchived"):
                     continue
@@ -231,20 +253,18 @@ class GitHubService:
             cursor = page_info.get("endCursor")
         return count
 
-    async def _iter_org_repositories(
-        self, org: str
-    ) -> AsyncIterator[Dict[str, Any]]:
+    async def _iter_org_repositories(self, org: str) -> AsyncIterator[dict[str, Any]]:
         """
         Iterate repositories in an organization.
 
         Yields repository nodes. Filters out archived repositories.
         """
-        cursor: Optional[str] = None
+        cursor: str | None = None
         while True:
             variables = {"org": org, "reposCursor": cursor}
             data = await self._api.graphql(ORG_REPOS_ONLY, variables)
             repos = ((data or {}).get("organization") or {}).get("repositories") or {}
-            nodes: List[Dict[str, Any]] = repos.get("nodes", []) or []
+            nodes: list[dict[str, Any]] = repos.get("nodes", []) or []
 
             for repo in nodes:
                 if repo.get("isArchived"):
@@ -258,7 +278,7 @@ class GitHubService:
 
     async def _iter_org_repositories_with_open_prs(
         self, org: str
-    ) -> AsyncIterator[Dict[str, Any]]:
+    ) -> AsyncIterator[dict[str, Any]]:
         """
         Iterate organization repositories only; PRs are fetched per repository.
 
@@ -269,8 +289,8 @@ class GitHubService:
             yield repo
 
     async def _iter_repo_open_prs_pages(
-        self, owner: str, name: str, cursor: Optional[str]
-    ) -> AsyncIterator[Dict[str, Any]]:
+        self, owner: str, name: str, cursor: str | None
+    ) -> AsyncIterator[dict[str, Any]]:
         """
         Iterate additional pages of open PRs for a specific repository.
         """
@@ -298,7 +318,7 @@ class GitHubService:
                 data = await self._api.graphql(REPO_OPEN_PRS_PAGE, variables)
             repo = (data or {}).get("repository") or {}
             prs = repo.get("pullRequests") or {}
-            nodes: List[Dict[str, Any]] = prs.get("nodes", []) or []
+            nodes: list[dict[str, Any]] = prs.get("nodes", []) or []
             for pr in nodes:
                 yield pr
 
@@ -309,7 +329,7 @@ class GitHubService:
 
     async def _fetch_repo_prs_first_page(
         self, owner: str, name: str
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """
         Fetch the first page of open PRs for a repository using GraphQL.
         Returns a tuple of (nodes, pageInfo).
@@ -336,8 +356,8 @@ class GitHubService:
             data = await self._api.graphql(REPO_OPEN_PRS_PAGE, variables)
         repo = (data or {}).get("repository") or {}
         prs = repo.get("pullRequests") or {}
-        nodes: List[Dict[str, Any]] = prs.get("nodes", []) or []
-        page_info: Dict[str, Any] = prs.get("pageInfo") or {}
+        nodes: list[dict[str, Any]] = prs.get("nodes", []) or []
+        page_info: dict[str, Any] = prs.get("pageInfo") or {}
         return nodes, page_info
 
     # -------------------------------
@@ -345,8 +365,8 @@ class GitHubService:
     # -------------------------------
 
     async def _analyze_pr_node(
-        self, repo_full_name: str, pr: Dict[str, Any]
-    ) -> Optional[UnmergeablePR]:
+        self, repo_full_name: str, pr: dict[str, Any]
+    ) -> UnmergeablePR | None:
         """
         Analyze a PR GraphQL node and produce UnmergeablePR if any blocking reasons
         are detected. Returns None if mergeable or if insufficient data.
@@ -357,7 +377,7 @@ class GitHubService:
             except Exception:
                 pass
 
-        reasons: List[UnmergeableReason] = []
+        reasons: list[UnmergeableReason] = []
 
         # Draft status
         if pr.get("isDraft") is True:
@@ -369,8 +389,12 @@ class GitHubService:
             )
 
         # Mergeability
-        mergeable = (pr.get("mergeable") or "").upper()  # MERGEABLE | CONFLICTING | UNKNOWN
-        merge_state = (pr.get("mergeStateStatus") or "").lower()  # clean, behind, blocked, draft, dirty, unknown
+        mergeable = (
+            pr.get("mergeable") or ""
+        ).upper()  # MERGEABLE | CONFLICTING | UNKNOWN
+        merge_state = (
+            pr.get("mergeStateStatus") or ""
+        ).lower()  # clean, behind, blocked, draft, dirty, unknown
 
         if mergeable == "CONFLICTING" or merge_state == "dirty":
             reasons.append(
@@ -421,12 +445,22 @@ class GitHubService:
         )
 
     def to_pull_request_info(
-        self, repo_full_name: str, pr: Dict[str, Any]
+        self, repo_full_name: str, pr: dict[str, Any]
     ) -> PullRequestInfo:
         """
         Convert a PR GraphQL node to PullRequestInfo (for merge workflows).
         """
         files = self._extract_file_changes(pr)
+        reviews = self._extract_reviews(pr)
+
+        # Debug logging to see actual GraphQL values
+        mergeable_raw = pr.get("mergeable")
+        merge_state_raw = pr.get("mergeStateStatus")
+        self.log.debug(
+            f"GraphQL raw values for PR {pr.get('number', 'unknown')}: "
+            f"mergeable='{mergeable_raw}', mergeStateStatus='{merge_state_raw}'"
+        )
+
         return PullRequestInfo(
             number=int(pr.get("number", 0)),
             title=pr.get("title") or "",
@@ -435,13 +469,14 @@ class GitHubService:
             head_sha=pr.get("headRefOid") or "",
             base_branch=pr.get("baseRefName") or "",
             head_branch=pr.get("headRefName") or "",
-            state="open",  # Query filters for open PRs
+            state="open",  # GraphQL query filters for OPEN PRs only, so all results are open
             mergeable=self._map_mergeable_enum(pr.get("mergeable")),
-            mergeable_state=(pr.get("mergeStateStatus") or "").lower() or None,
+            mergeable_state=self._safe_get_merge_state(pr.get("mergeStateStatus")),
             behind_by=None,  # Not included in GraphQL; could be computed if needed
             files_changed=files,
             repository_full_name=repo_full_name,
             html_url=pr.get("url") or "",
+            reviews=reviews,
         )
 
     async def find_similar_prs(
@@ -451,7 +486,7 @@ class GitHubService:
         comparator,
         *,
         only_automation: bool,
-    ) -> List[Tuple[PullRequestInfo, ComparisonResult]]:
+    ) -> list[tuple[PullRequestInfo, ComparisonResult]]:
         """
         Find PRs across an organization that are similar to the provided source PR.
 
@@ -470,7 +505,7 @@ class GitHubService:
         Returns:
             List of (PullRequestInfo, ComparisonResult) tuples for similar PRs.
         """
-        results: List[Tuple[PullRequestInfo, ComparisonResult]] = []
+        results: list[tuple[PullRequestInfo, ComparisonResult]] = []
 
         # Set total repositories for the progress display
         try:
@@ -490,20 +525,26 @@ class GitHubService:
 
             if self._progress:
                 self._progress.start_repository(repo_full_name)
-                self._progress.update_operation(f"Getting open PRs from {repo_full_name}")
+                self._progress.update_operation(
+                    f"Getting open PRs from {repo_full_name}"
+                )
 
             owner_n, name_n = repo_full_name.split("/", 1)
-            first_nodes, page_info = await self._fetch_repo_prs_first_page(owner_n, name_n)
+            first_nodes, page_info = await self._fetch_repo_prs_first_page(
+                owner_n, name_n
+            )
             prs = list(first_nodes)
             has_next = bool(page_info.get("hasNextPage"))
             end_cursor = page_info.get("endCursor") or None
 
             # Include additional pages if present
             if has_next:
-                async for pr_node in self._iter_repo_open_prs_pages(owner_n, name_n, end_cursor):
+                async for pr_node in self._iter_repo_open_prs_pages(
+                    owner_n, name_n, end_cursor
+                ):
                     prs.append(pr_node)
 
-            matching_prs_in_repo: List[Tuple[PullRequestInfo, ComparisonResult]] = []
+            matching_prs_in_repo: list[tuple[PullRequestInfo, ComparisonResult]] = []
 
             for pr_node in prs:
                 target_pr = self.to_pull_request_info(repo_full_name, pr_node)
@@ -519,7 +560,13 @@ class GitHubService:
                 if only_automation:
                     is_auto = any(
                         bot in (target_pr.author or "").lower()
-                        for bot in ["dependabot", "renovate", "pre-commit", "github-actions", "bot"]
+                        for bot in [
+                            "dependabot",
+                            "renovate",
+                            "pre-commit",
+                            "github-actions",
+                            "bot",
+                        ]
                     )
                     if not is_auto:
                         continue
@@ -530,20 +577,31 @@ class GitHubService:
                 if self._progress:
                     self._progress.analyze_pr(target_pr.number, repo_full_name)
 
-                comparison: ComparisonResult = comparator.compare_pull_requests(source_pr, target_pr, only_automation)
+                comparison: ComparisonResult = comparator.compare_pull_requests(
+                    source_pr, target_pr, only_automation
+                )
 
                 # Debug matching output
                 if self._debug_matching:
                     from rich.console import Console
+
                     debug_console = Console()
-                    debug_console.print(f"\n🔍 [bold]Comparing {repo_full_name}#{target_pr.number}[/bold]")
+                    debug_console.print(
+                        f"\n🔍 [bold]Comparing {repo_full_name}#{target_pr.number}[/bold]"
+                    )
                     debug_console.print(f"   Title: {target_pr.title}")
                     debug_console.print(f"   Author: {target_pr.author}")
 
                     # Show individual scores
-                    title_score = comparator._compare_titles(source_pr.title, target_pr.title)
-                    body_score = comparator._compare_bodies(source_pr.body, target_pr.body)
-                    files_score = comparator._compare_file_changes(source_pr.files_changed, target_pr.files_changed)
+                    title_score = comparator._compare_titles(
+                        source_pr.title, target_pr.title
+                    )
+                    body_score = comparator._compare_bodies(
+                        source_pr.body, target_pr.body
+                    )
+                    files_score = comparator._compare_file_changes(
+                        source_pr.files_changed, target_pr.files_changed
+                    )
                     author_score = (
                         1.0
                         if comparator._normalize_author(source_pr.author)
@@ -555,19 +613,31 @@ class GitHubService:
                     debug_console.print(f"   📄 Body score: {body_score:.3f}")
                     debug_console.print(f"   📁 Files score: {files_score:.3f}")
                     debug_console.print(f"   👤 Author score: {author_score:.3f}")
-                    debug_console.print(f"   🎯 Overall: {comparison.confidence_score:.3f} (threshold: 0.8)")
+                    debug_console.print(
+                        f"   🎯 Overall: {comparison.confidence_score:.3f} (threshold: 0.8)"
+                    )
 
                     if comparison.is_similar:
-                        debug_console.print(f"   ✅ [green]SIMILAR[/green] - {', '.join(comparison.reasons)}")
+                        debug_console.print(
+                            f"   ✅ [green]SIMILAR[/green] - {', '.join(comparison.reasons)}"
+                        )
                     else:
                         debug_console.print("   ❌ [red]NOT SIMILAR[/red]")
 
                         # Show why it failed
                         if title_score == 0:
-                            source_pkg = comparator._extract_package_name(source_pr.title)
-                            target_pkg = comparator._extract_package_name(target_pr.title)
-                            debug_console.print(f"      📦 Source package: '{source_pkg}'")
-                            debug_console.print(f"      📦 Target package: '{target_pkg}'")
+                            source_pkg = comparator._extract_package_name(
+                                source_pr.title
+                            )
+                            target_pkg = comparator._extract_package_name(
+                                target_pr.title
+                            )
+                            debug_console.print(
+                                f"      📦 Source package: '{source_pkg}'"
+                            )
+                            debug_console.print(
+                                f"      📦 Target package: '{target_pkg}'"
+                            )
 
                         if body_score < 0.6:
                             if target_pr.body is None:
@@ -575,7 +645,9 @@ class GitHubService:
                             elif source_pr.body is None:
                                 debug_console.print("      ⚠️  Source PR has no body")
                             else:
-                                debug_console.print(f"      📄 Body comparison failed (score: {body_score:.3f})")
+                                debug_console.print(
+                                    f"      📄 Body comparison failed (score: {body_score:.3f})"
+                                )
 
                 if comparison.is_similar:
                     matching_prs_in_repo.append((target_pr, comparison))
@@ -594,31 +666,194 @@ class GitHubService:
 
         return results
 
+    async def get_branch_protection_settings(
+        self, owner: str, repo: str, branch: str = "main"
+    ) -> dict[str, Any] | None:
+        """
+        Get branch protection settings for a repository branch.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            branch: Branch name (defaults to "main")
+
+        Returns:
+            Branch protection settings dict, or None if no protection or error
+        """
+        cache_key = f"{owner}/{repo}:{branch}"
+
+        # Check cache first
+        if cache_key in self._branch_protection_cache:
+            return self._branch_protection_cache[cache_key]
+
+        if not self._api:
+            return None
+
+        try:
+            variables = {"owner": owner, "name": repo, "branch": f"refs/heads/{branch}"}
+
+            response = await self._api.graphql(GET_BRANCH_PROTECTION, variables)
+
+            # Debug: Log the actual response structure
+            self.log.debug(f"GraphQL response for {owner}/{repo}: {response}")
+
+            repo_data = response.get("repository")
+            if not repo_data:
+                self.log.debug(f"No repository data for {owner}/{repo}")
+                self._branch_protection_cache[cache_key] = None
+                return None
+
+            # Start with repository-level merge settings
+            protection = {
+                "allowsMergeCommits": repo_data.get("mergeCommitAllowed", True),
+                "allowsSquashMerges": repo_data.get("squashMergeAllowed", True),
+                "allowsRebaseMerges": repo_data.get("rebaseMergeAllowed", True),
+            }
+
+            # Add branch protection rule settings if they exist
+            ref_data = repo_data.get("ref")
+            if ref_data:
+                branch_protection = ref_data.get("branchProtectionRule")
+                if branch_protection:
+                    protection.update(branch_protection)
+
+            self._branch_protection_cache[cache_key] = protection
+
+            self.log.info(
+                f"Branch protection for {owner}/{repo}:{branch}: "
+                f"requiresLinearHistory={protection.get('requiresLinearHistory', False)}, "
+                f"allowsMergeCommits={protection.get('allowsMergeCommits')}, "
+                f"allowsSquashMerges={protection.get('allowsSquashMerges')}, "
+                f"allowsRebaseMerges={protection.get('allowsRebaseMerges')}"
+            )
+
+            return protection
+
+        except Exception as e:
+            self.log.warning(
+                f"Failed to get branch protection for {owner}/{repo}:{branch}: {e}"
+            )
+            # Cache the None result to avoid repeated failures
+            self._branch_protection_cache[cache_key] = None
+            return None
+
+    def determine_merge_method(
+        self, branch_protection: dict[str, Any] | None, default_method: str = "merge"
+    ) -> str:
+        """
+        Determine the appropriate merge method based on branch protection settings.
+
+        Args:
+            branch_protection: Branch protection settings from GraphQL
+            default_method: Default merge method to use if no restrictions
+
+        Returns:
+            Recommended merge method: "merge", "squash", or "rebase"
+        """
+        if not branch_protection:
+            return default_method
+
+        # If linear history is required, only rebase merge is allowed
+        if branch_protection.get("requiresLinearHistory", False):
+            if branch_protection.get("allowsRebaseMerges", True):
+                return "rebase"
+            else:
+                self.log.warning(
+                    "Repository requires linear history but doesn't allow rebase merges"
+                )
+                return default_method
+
+        # Otherwise, prefer the default method if it's allowed
+        if default_method == "merge" and branch_protection.get(
+            "allowsMergeCommits", True
+        ):
+            return "merge"
+        elif default_method == "squash" and branch_protection.get(
+            "allowsSquashMerges", True
+        ):
+            return "squash"
+        elif default_method == "rebase" and branch_protection.get(
+            "allowsRebaseMerges", True
+        ):
+            return "rebase"
+
+        # Fall back to first available method
+        if branch_protection.get("allowsMergeCommits", True):
+            return "merge"
+        elif branch_protection.get("allowsSquashMerges", True):
+            return "squash"
+        elif branch_protection.get("allowsRebaseMerges", True):
+            return "rebase"
+
+        self.log.warning(
+            f"No merge methods allowed by branch protection: {branch_protection}"
+        )
+        return default_method
+
     # -----------------
-    # Helper functions
+    # Helper methods
     # -----------------
 
-    def _split_owner_repo(self, full_name: str) -> Tuple[str, str]:
+    def _split_owner_repo(self, full_name: str) -> tuple[str, str]:
         try:
             owner, name = full_name.split("/", 1)
             return owner, name
         except Exception:
             return "unknown", "unknown"
 
-    def _map_mergeable_enum(self, value: Optional[str]) -> Optional[bool]:
+    def _map_mergeable_enum(self, value: str | None) -> bool | None:
         # GraphQL mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
+        self.log.debug(f"Mapping mergeable enum: '{value}'")
         if not value:
+            self.log.debug("mergeable value is falsy (None, empty, etc.)")
             return None
         v = value.upper()
         if v == "MERGEABLE":
+            self.log.debug("Mapped to True (mergeable)")
             return True
         if v == "CONFLICTING":
+            self.log.debug("Mapped to False (conflicting)")
             return False
+        if v == "UNKNOWN":
+            # GitHub is still calculating - treat as potentially mergeable
+            self.log.debug("Mapped UNKNOWN to None (still calculating)")
+            return None
+        # Log unexpected values for debugging
+        self.log.warning(f"Unexpected mergeable value from GraphQL: {value}")
         return None
 
-    def _extract_file_changes(self, pr: Dict[str, Any]) -> List[FileChange]:
+    def _safe_get_merge_state(self, merge_state_status: str | None) -> str | None:
+        """Safely extract and normalize mergeStateStatus from GraphQL."""
+        if not merge_state_status:
+            # Log when we get null/missing mergeStateStatus for debugging
+            self.log.debug("GraphQL mergeStateStatus is null or missing")
+            return None
+
+        normalized = merge_state_status.lower().strip()
+        if not normalized:
+            self.log.debug("GraphQL mergeStateStatus is empty string")
+            return None
+
+        # Valid states: clean, dirty, blocked, behind, draft, unstable, unknown
+        valid_states = {
+            "clean",
+            "dirty",
+            "blocked",
+            "behind",
+            "draft",
+            "unstable",
+            "unknown",
+        }
+        if normalized not in valid_states:
+            self.log.warning(
+                f"Unexpected mergeStateStatus from GraphQL: {merge_state_status}"
+            )
+
+        return normalized
+
+    def _extract_file_changes(self, pr: dict[str, Any]) -> list[FileChange]:
         files = (pr.get("files") or {}).get("nodes", []) or []
-        result: List[FileChange] = []
+        result: list[FileChange] = []
         for f in files:
             additions = int(f.get("additions") or 0)
             deletions = int(f.get("deletions") or 0)
@@ -633,9 +868,29 @@ class GitHubService:
             )
         return result
 
-    def _extract_copilot_comments(self, pr: Dict[str, Any]) -> List[CopilotComment]:
+    def _extract_reviews(self, pr: dict[str, Any]) -> list[ReviewInfo]:
+        """Extract PR reviews from GraphQL node."""
+        reviews = (pr.get("reviews") or {}).get("nodes", []) or []
+        result: list[ReviewInfo] = []
+
+        for review in reviews:
+            author = (review.get("author") or {}).get("login") or "unknown"
+            result.append(
+                ReviewInfo(
+                    # NOTE: GraphQL returns string node IDs (e.g., "PRR_kwDOGBtQpc4-u-zD")
+                    # NOT numeric IDs. Do not convert to int() - it will cause runtime errors.
+                    id=review.get("id", ""),
+                    user=author,
+                    state=review.get("state") or "",
+                    submitted_at=review.get("createdAt") or "",
+                    body=review.get("body"),
+                )
+            )
+        return result
+
+    def _extract_copilot_comments(self, pr: dict[str, Any]) -> list[CopilotComment]:
         comments = (pr.get("comments") or {}).get("nodes", []) or []
-        result: List[CopilotComment] = []
+        result: list[CopilotComment] = []
         for c in comments:
             author = ((c.get("author") or {}).get("login") or "").lower()
             if author in ("github-copilot[bot]", "copilot"):
@@ -649,17 +904,15 @@ class GitHubService:
                 )
         return result
 
-    def _extract_failing_checks(self, pr: Dict[str, Any]) -> List[str]:
+    def _extract_failing_checks(self, pr: dict[str, Any]) -> list[str]:
         """
         Extract failing checks from the statusCheckRollup on the latest commit.
         """
-        failing: List[str] = []
+        failing: list[str] = []
 
         commits = (pr.get("commits") or {}).get("nodes", []) or []
         if not commits:
             return failing
-
-
 
         commit = (commits[0] or {}).get("commit") or {}
         rollup = commit.get("statusCheckRollup") or {}

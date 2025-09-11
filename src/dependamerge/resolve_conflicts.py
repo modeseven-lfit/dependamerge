@@ -27,11 +27,10 @@ import os
 import shlex
 import subprocess
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
 
-from .github_async import GitHubAsync
 from .git_ops import (
     GitError,
     add,
@@ -51,11 +50,13 @@ from .git_ops import (
     run_git,
     secure_rmtree,
 )
+from .github_async import GitHubAsync
 
 
 @dataclass(frozen=True)
 class PRSelection:
     """Minimal PR selector: repository 'owner/repo' and PR number."""
+
     repository: str
     pr_number: int
 
@@ -74,27 +75,30 @@ class FixOptions:
         interactive: If True, attach git commands to TTY where useful for user feedback.
         logger: Optional logger callable for informational messages (redacted).
     """
-    workdir: Optional[str] = None
+
+    workdir: str | None = None
     keep_temp: bool = False
     prefetch: int = 6
-    editor: Optional[str] = None
+    editor: str | None = None
     mergetool: bool = False
     interactive: bool = True
-    logger: Optional[Callable[[str], None]] = None
+    logger: Callable[[str], None] | None = None
 
 
 @dataclass
 class FixResult:
     """Outcome of attempting to fix a single PR."""
+
     selection: PRSelection
     success: bool
     message: str
-    workspace: Optional[str] = None
+    workspace: str | None = None
 
 
 @dataclass
 class PRContext:
     """Detailed PR information required for cloning/rebasing/pushing."""
+
     owner: str
     repo: str
     pr_number: int
@@ -109,7 +113,9 @@ class PRContext:
 
     @property
     def selection(self) -> PRSelection:
-        return PRSelection(repository=f"{self.owner}/{self.repo}", pr_number=self.pr_number)
+        return PRSelection(
+            repository=f"{self.owner}/{self.repo}", pr_number=self.pr_number
+        )
 
 
 class FixOrchestrator:
@@ -123,8 +129,8 @@ class FixOrchestrator:
         self,
         token: str,
         *,
-        progress_tracker: Optional[object] = None,
-        logger: Optional[Callable[[str], None]] = None,
+        progress_tracker: object | None = None,
+        logger: Callable[[str], None] | None = None,
     ) -> None:
         if not token:
             raise ValueError("A GitHub token is required for fix operations.")
@@ -132,14 +138,16 @@ class FixOrchestrator:
         self._progress = progress_tracker
         self._logger = logger or (lambda m: None)
 
-    async def fetch_pr_details(self, selections: Sequence[PRSelection]) -> List[PRContext]:
+    async def fetch_pr_details(
+        self, selections: Sequence[PRSelection]
+    ) -> list[PRContext]:
         """
         Fetch PR details via REST (single GitHubAsync session) for all selections.
 
         Returns:
             A list of PRContext containing the necessary repo/branch/permission info.
         """
-        contexts: List[PRContext] = []
+        contexts: list[PRContext] = []
 
         async with GitHubAsync(token=self._token) as api:
             tasks = []
@@ -147,7 +155,9 @@ class FixOrchestrator:
                 try:
                     owner, repo = sel.repository.split("/", 1)
                 except ValueError:
-                    self._log(f"Skipping invalid repository full name: {sel.repository}")
+                    self._log(
+                        f"Skipping invalid repository full name: {sel.repository}"
+                    )
                     continue
 
                 tasks.append(self._fetch_one_pr(api, owner, repo, sel.pr_number))
@@ -164,22 +174,24 @@ class FixOrchestrator:
 
     async def _fetch_one_pr(
         self, api: GitHubAsync, owner: str, repo: str, number: int
-    ) -> Optional[PRContext]:
+    ) -> PRContext | None:
         data = await api.get(f"/repos/{owner}/{repo}/pulls/{number}")
         if not isinstance(data, dict):
             return None
 
-        base = (data.get("base") or {})
-        head = (data.get("head") or {})
+        base = data.get("base") or {}
+        head = data.get("head") or {}
         base_repo = (base.get("repo") or {}) or {}
         head_repo = (head.get("repo") or {}) or {}
 
         base_branch = (base.get("ref") or "") or ""
         head_branch = (head.get("ref") or "") or ""
-        base_full = (base_repo.get("full_name") or f"{owner}/{repo}") or f"{owner}/{repo}"
+        base_full = (
+            base_repo.get("full_name") or f"{owner}/{repo}"
+        ) or f"{owner}/{repo}"
         head_full = (head_repo.get("full_name") or base_full) or base_full
-        base_clone = (base_repo.get("clone_url") or f"https://github.com/{base_full}.git")
-        head_clone = (head_repo.get("clone_url") or base_clone)
+        base_clone = base_repo.get("clone_url") or f"https://github.com/{base_full}.git"
+        head_clone = head_repo.get("clone_url") or base_clone
         is_fork = bool(head_repo.get("fork")) if head_repo else False
         maint_mod = bool(data.get("maintainer_can_modify"))
 
@@ -197,7 +209,9 @@ class FixOrchestrator:
             maintainer_can_modify=maint_mod,
         )
 
-    def run(self, selections: Sequence[PRSelection], options: FixOptions) -> List[FixResult]:
+    def run(
+        self, selections: Sequence[PRSelection], options: FixOptions
+    ) -> list[FixResult]:
         """
         Perform the full fix process:
           - create or use secure base workdir
@@ -230,8 +244,8 @@ class FixOrchestrator:
             contexts = asyncio.run(self.fetch_pr_details(selections))
 
             # Filter out PRs we cannot push to (forks without maintainer_can_modify)
-            prepared: List[Tuple[PRContext, Optional[Path], Optional[str]]] = []
-            to_prepare: List[PRContext] = []
+            prepared: list[tuple[PRContext, Path | None, str | None]] = []
+            to_prepare: list[PRContext] = []
             for ctx in contexts:
                 if ctx.is_fork and not ctx.maintainer_can_modify:
                     msg = "Skipping fork without maintainer-can-modify permission"
@@ -249,18 +263,28 @@ class FixOrchestrator:
                             op("Preparing workspaces (clone/fetch repos)...")
                         except Exception:
                             pass
-                prepared += self._prepare_workspaces_parallel(to_prepare, base_dir, options)
+                prepared += self._prepare_workspaces_parallel(
+                    to_prepare, base_dir, options
+                )
             else:
                 self._log("No PRs eligible for workspace preparation.")
 
             # Interactive resolution in serial to keep terminal clear
-            resolver = InteractiveResolver(token=self._token, logger=options.logger or self._logger)
+            resolver = InteractiveResolver(
+                token=self._token, logger=options.logger or self._logger
+            )
 
-            results: List[FixResult] = []
+            results: list[FixResult] = []
             for ctx, workspace, prep_err in prepared:
                 sel = ctx.selection
                 if workspace is None:
-                    results.append(FixResult(selection=sel, success=False, message=prep_err or "Preparation failed"))
+                    results.append(
+                        FixResult(
+                            selection=sel,
+                            success=False,
+                            message=prep_err or "Preparation failed",
+                        )
+                    )
                     continue
 
                 if self._progress:
@@ -270,11 +294,20 @@ class FixOrchestrator:
                             suspend_fn()
                         except Exception:
                             pass
-                self._log(f"Starting interactive rebase for {ctx.base_repo_full_name}#{ctx.pr_number} in {workspace}")
+                self._log(
+                    f"Starting interactive rebase for {ctx.base_repo_full_name}#{ctx.pr_number} in {workspace}"
+                )
 
                 try:
                     ok, msg = resolver.resolve(ctx, workspace, options)
-                    results.append(FixResult(selection=sel, success=ok, message=msg, workspace=str(workspace)))
+                    results.append(
+                        FixResult(
+                            selection=sel,
+                            success=ok,
+                            message=msg,
+                            workspace=str(workspace),
+                        )
+                    )
                     self._log(f"{ctx.base_repo_full_name}#{ctx.pr_number}: {msg}")
                 except KeyboardInterrupt:
                     # Attempt to abort any in-progress rebase and record failure
@@ -282,10 +315,26 @@ class FixOrchestrator:
                         rebase_abort(cwd=workspace)
                     except Exception:
                         pass
-                    results.append(FixResult(selection=sel, success=False, message="Aborted by user", workspace=str(workspace)))
-                    self._log(f"{ctx.base_repo_full_name}#{ctx.pr_number}: Aborted by user")
+                    results.append(
+                        FixResult(
+                            selection=sel,
+                            success=False,
+                            message="Aborted by user",
+                            workspace=str(workspace),
+                        )
+                    )
+                    self._log(
+                        f"{ctx.base_repo_full_name}#{ctx.pr_number}: Aborted by user"
+                    )
                 except Exception as e:
-                    results.append(FixResult(selection=sel, success=False, message=f"Error: {e}", workspace=str(workspace)))
+                    results.append(
+                        FixResult(
+                            selection=sel,
+                            success=False,
+                            message=f"Error: {e}",
+                            workspace=str(workspace),
+                        )
+                    )
                     self._log(f"{ctx.base_repo_full_name}#{ctx.pr_number}: Error: {e}")
                 finally:
                     if self._progress:
@@ -304,23 +353,25 @@ class FixOrchestrator:
                     secure_rmtree(str(base_dir))
                     self._log(f"Removed temp workspace at {base_dir}")
                 except Exception as e:
-                    self._log(f"Warning: Failed to remove temp workspace {base_dir}: {e}")
+                    self._log(
+                        f"Warning: Failed to remove temp workspace {base_dir}: {e}"
+                    )
 
     def _prepare_workspaces_parallel(
         self,
         contexts: Sequence[PRContext],
         base_dir: Path,
         options: FixOptions,
-    ) -> List[Tuple[PRContext, Optional[Path], Optional[str]]]:
+    ) -> list[tuple[PRContext, Path | None, str | None]]:
         """
         Clone/fetch repositories for contexts in parallel.
 
         Returns:
             List of tuples (context, workspace_path or None, error_message or None).
         """
-        results: List[Tuple[PRContext, Optional[Path], Optional[str]]] = []
+        results: list[tuple[PRContext, Path | None, str | None]] = []
 
-        def worker(ctx: PRContext) -> Tuple[PRContext, Optional[Path], Optional[str]]:
+        def worker(ctx: PRContext) -> tuple[PRContext, Path | None, str | None]:
             try:
                 ws = self._prepare_single_workspace(ctx, base_dir, options)
                 return (ctx, ws, None)
@@ -349,7 +400,9 @@ class FixOrchestrator:
         - If base repo differs, add 'upstream' remote and fetch base_branch.
         - If same repo, ensure base_branch is fetched from origin as well.
         """
-        workspace_name = f"{ctx.head_repo_full_name.replace('/', '__')}__pr_{ctx.pr_number}"
+        workspace_name = (
+            f"{ctx.head_repo_full_name.replace('/', '__')}__pr_{ctx.pr_number}"
+        )
         workspace = base_dir / workspace_name
         workspace.mkdir(parents=True, exist_ok=True)
 
@@ -359,12 +412,23 @@ class FixOrchestrator:
 
         # Clone head repo
         self._log(f"Cloning {ctx.head_repo_full_name}@{ctx.head_branch} -> {workspace}")
-        clone(origin_url, workspace, branch=ctx.head_branch, depth=50, single_branch=True, no_tags=True, filter_blobs=True, logger=self._log)
+        clone(
+            origin_url,
+            workspace,
+            branch=ctx.head_branch,
+            depth=50,
+            single_branch=True,
+            no_tags=True,
+            filter_blobs=True,
+            logger=self._log,
+        )
 
         # Ensure we have base branch available for rebase
         if ctx.head_repo_full_name != ctx.base_repo_full_name:
             add_remote("upstream", upstream_url, cwd=workspace, logger=self._log)
-            fetch("upstream", ctx.base_branch, cwd=workspace, depth=50, logger=self._log)
+            fetch(
+                "upstream", ctx.base_branch, cwd=workspace, depth=50, logger=self._log
+            )
         else:
             # Same repo; fetch the base branch from origin if not present
             fetch("origin", ctx.base_branch, cwd=workspace, depth=50, logger=self._log)
@@ -407,24 +471,36 @@ class InteractiveResolver:
         self,
         token: str,
         *,
-        logger: Optional[Callable[[str], None]] = None,
+        logger: Callable[[str], None] | None = None,
     ) -> None:
         self._token = token
         self._log = logger or (lambda m: None)
 
-    def resolve(self, ctx: PRContext, workspace: Path, options: FixOptions) -> Tuple[bool, str]:
+    def resolve(
+        self, ctx: PRContext, workspace: Path, options: FixOptions
+    ) -> tuple[bool, str]:
         """
         Resolve conflicts interactively in the given workspace.
 
         Returns:
             (success, message)
         """
-        base_remote = "upstream" if ctx.head_repo_full_name != ctx.base_repo_full_name else "origin"
+        base_remote = (
+            "upstream"
+            if ctx.head_repo_full_name != ctx.base_repo_full_name
+            else "origin"
+        )
         base_ref = f"{base_remote}/{ctx.base_branch}"
 
         # Initial rebase attempt
         self._log(f"Rebasing onto {base_ref}")
-        rb = rebase(base_ref, cwd=workspace, autostash=True, interactive=options.interactive, logger=self._log)
+        rb = rebase(
+            base_ref,
+            cwd=workspace,
+            autostash=True,
+            interactive=options.interactive,
+            logger=self._log,
+        )
         if rb.returncode == 0:
             # Clean rebase; proceed to post steps
             self._log("Rebase completed without conflicts.")
@@ -436,13 +512,17 @@ class InteractiveResolver:
                 if not conflicts:
                     # Sometimes rebase stops without conflicts (e.g., needs staging)
                     # Try to continue directly.
-                    cont = rebase_continue(cwd=workspace, interactive=options.interactive, logger=self._log)
+                    cont = rebase_continue(
+                        cwd=workspace, interactive=options.interactive, logger=self._log
+                    )
                     if cont.returncode == 0:
                         break
                     # If still not continuing, give the user a chance to edit anything
                     self._open_editor_for_paths(workspace, [], options)
                     add_all(cwd=workspace, logger=self._log)
-                    cont = rebase_continue(cwd=workspace, interactive=options.interactive, logger=self._log)
+                    cont = rebase_continue(
+                        cwd=workspace, interactive=options.interactive, logger=self._log
+                    )
                     if cont.returncode == 0:
                         break
                     # If it still fails, abort with an error message
@@ -461,7 +541,9 @@ class InteractiveResolver:
                     add(conflicts, cwd=workspace, logger=self._log)
 
                 # Attempt to continue
-                cont = rebase_continue(cwd=workspace, interactive=options.interactive, logger=self._log)
+                cont = rebase_continue(
+                    cwd=workspace, interactive=options.interactive, logger=self._log
+                )
                 if cont.returncode == 0:
                     break
                 # If still conflicts, loop again
@@ -475,7 +557,9 @@ class InteractiveResolver:
 
         if commit_count == 1:
             # Single-commit PR: amend to preserve no extra top commit (no message change)
-            self._log("Single-commit change detected; amending commit without editing message.")
+            self._log(
+                "Single-commit change detected; amending commit without editing message."
+            )
             try:
                 commit_amend_no_edit(cwd=workspace, logger=self._log)
             except GitError as e:
@@ -483,15 +567,28 @@ class InteractiveResolver:
                 self._log(f"Warning: amend failed: {e}")
 
         # Force push to update PR head branch
-        self._log(f"Pushing updated branch with --force-with-lease to origin {ctx.head_branch}")
+        self._log(
+            f"Pushing updated branch with --force-with-lease to origin {ctx.head_branch}"
+        )
         try:
-            push_force_with_lease("origin", "HEAD", f"refs/heads/{ctx.head_branch}", cwd=workspace, logger=self._log)
+            push_force_with_lease(
+                "origin",
+                "HEAD",
+                f"refs/heads/{ctx.head_branch}",
+                cwd=workspace,
+                logger=self._log,
+            )
         except GitError as e:
             return False, f"Push failed: {e}"
 
-        return True, "Rebased, amended (if applicable), and force-pushed to trigger checks"
+        return (
+            True,
+            "Rebased, amended (if applicable), and force-pushed to trigger checks",
+        )
 
-    def _open_editor_for_paths(self, cwd: Path, paths: Sequence[str], options: FixOptions) -> None:
+    def _open_editor_for_paths(
+        self, cwd: Path, paths: Sequence[str], options: FixOptions
+    ) -> None:
         """
         Open the user's editor for the given file paths. If no paths provided,
         open the editor at the repository root to allow manual edits.
@@ -499,7 +596,9 @@ class InteractiveResolver:
         editor_cmd = self._pick_editor(options)
         if not editor_cmd:
             # As a last resort, print instructions
-            self._log("No editor found. Please resolve conflicts manually in the workspace and then continue.")
+            self._log(
+                "No editor found. Please resolve conflicts manually in the workspace and then continue."
+            )
             return
 
         # If the editor is VS Code ('code'), ensure we wait for window close (-w)
@@ -515,7 +614,9 @@ class InteractiveResolver:
             # Open editor at repo root
             self._run_editor(cmd_parts, cwd, None)
 
-    def _run_editor(self, cmd_parts: List[str], cwd: Path, rel_path: Optional[str]) -> None:
+    def _run_editor(
+        self, cmd_parts: list[str], cwd: Path, rel_path: str | None
+    ) -> None:
         args = list(cmd_parts)
         if rel_path:
             args.append(rel_path)
@@ -525,9 +626,15 @@ class InteractiveResolver:
     def _run_mergetool(self, cwd: Path, rel_path: str, options: FixOptions) -> None:
         # Prefer --no-prompt to block until the tool finishes for this file
         args = ["git", "mergetool", "--no-prompt", "--", rel_path]
-        run_git(args, cwd=cwd, interactive=options.interactive, check=False, logger=self._log)
+        run_git(
+            args,
+            cwd=cwd,
+            interactive=options.interactive,
+            check=False,
+            logger=self._log,
+        )
 
-    def _pick_editor(self, options: FixOptions) -> Optional[str]:
+    def _pick_editor(self, options: FixOptions) -> str | None:
         if options.editor:
             return options.editor
         # Environment-driven choice
