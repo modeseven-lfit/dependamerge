@@ -85,7 +85,7 @@ origin.
   command
 - **Security Features**: SHA-based authentication for non-automation PRs
   ensures authorized bulk merges
-- **Dry Run Mode**: Preview what changes will apply without modifications
+- **Interactive Dry Run Mode**: Preview what changes will apply, then optionally proceed with merge
 
 ### General Features
 
@@ -321,10 +321,35 @@ dependamerge merge \
   https://github.com/lfreleng-actions/python-project-name-action/pull/22
 ```
 
-### Dry Run (Preview Mode)
+### Dry Run (Interactive Preview Mode)
+
+The dry-run mode shows you exactly what PRs would be merged, then prompts you to continue:
 
 ```bash
 dependamerge merge https://github.com/owner/repo/pull/123 --dry-run
+```
+
+**Interactive Flow:**
+1. Analyzes and shows similar PRs that would be merged
+2. Displays merge evaluation results
+3. Generates a unique SHA for security validation
+4. Prompts you to enter the SHA to proceed with actual merging
+5. Only merges PRs that were shown as "mergeable" in the dry-run
+
+**Example Output:**
+```
+🔍 Dependamerge Evaluation
+
+✅ Approve/merge: https://github.com/org/repo1/pull/45
+⏭️ Skipped: https://github.com/org/repo2/pull/67 [cannot update protected ref]
+✅ Approve/merge: https://github.com/org/repo3/pull/89
+
+▶️ Mergeable 2/3 PRs
+
+🚀 To proceed with merging the mergeable PRs:
+💡 Enter the SHA: abc123def456
+Enter SHA to continue (or press Enter to cancel): abc123def456
+✅ SHA validated. Proceeding with merge...
 ```
 
 ### Custom Merge Options
@@ -350,7 +375,7 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 
 #### Merge Command Options
 
-- `--dry-run`: Show what changes will apply without making them
+- `--dry-run`: Show what changes will apply, then prompt to proceed with merge
 - `--threshold FLOAT`: Similarity threshold for matching PRs (0.0-1.0,
   default: 0.8)
 - `--merge-method TEXT`: Merge method - merge, squash, or rebase (default:
@@ -458,7 +483,7 @@ using the most appropriate method:
 # Merge with automatic Copilot review resolution
 dependamerge merge https://github.com/myorg/repo1/pull/67 --dismiss-copilot
 
-# Dry run to see which Copilot items the tool will resolve
+# Interactive dry run to see which Copilot items the tool will resolve, then choose to proceed
 dependamerge merge https://github.com/myorg/repo1/pull/67 --dismiss-copilot --dry-run
 
 # With Copilot dismissal enabled
@@ -477,7 +502,7 @@ The tool intelligently handles GitHub API limitations by automatically falling
 back to thread-level resolution for COMMENTED reviews, ensuring comprehensive
 coverage without requiring user intervention.
 
-#### Dry Run with Fix Option
+#### Interactive Dry Run with Fix Option
 
 ```bash
 # See what changes will apply (default: fix out-of-date branches)
@@ -497,7 +522,7 @@ dependamerge merge https://github.com/myorg/repo1/pull/78 \
   blocked by checks, etc.)
 - **Similarity Threshold**: Configurable confidence threshold prevents incorrect
   matches
-- **Dry Run Mode**: Always test with `--dry-run` first
+- **Interactive Dry Run Mode**: Always test with `--dry-run` first - it shows results then lets you choose to proceed
 - **Detailed Logging**: Shows which PRs match and why they match
 
 ### Security for All PRs
@@ -646,7 +671,7 @@ Solution: Add workflow/actions permissions:
 
 - Check that other repositories have open automation PRs
 - Try lowering the similarity threshold with `--threshold 0.7`
-- Use `--dry-run` to see detailed matching information
+- Use `--dry-run` to see detailed matching information and optionally proceed with merge
 
 #### Merge Failures
 
@@ -659,14 +684,14 @@ Solution: Add workflow/actions permissions:
 - Check the command help (local dev): `uv run dependamerge --help`
 - For PyPI usage: `uvx dependamerge --help`
 - Enable verbose output with environment variables
-- Review similarity scoring in dry-run mode (`--dry-run`)
+- Review similarity scoring in interactive dry-run mode (`--dry-run`)
 
 ## Security Considerations
 
 - Store GitHub tokens securely (environment variables, not in code)
 - Use tokens with minimal required permissions for your use case
 - Rotate access tokens periodically
-- Review PR changes in dry-run mode first
+- Review PR changes in interactive dry-run mode first
 - Be cautious with low similarity thresholds
 - Consider using repository-specific tokens instead of organization-wide access
   when possible

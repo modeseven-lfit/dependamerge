@@ -87,6 +87,9 @@ class TestCLI:
 
         mock_client.get_pull_request_info.side_effect = get_pr_info_side_effect
         mock_client.get_pr_status_details.return_value = "Ready to merge"
+        mock_client.get_pull_request_commits.return_value = [
+            "Bump requests from 2.28.0 to 2.28.1"
+        ]
 
         # Mock comparison result
         from dependamerge.models import ComparisonResult

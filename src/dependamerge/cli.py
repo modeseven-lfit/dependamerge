@@ -4,6 +4,7 @@
 import asyncio
 import hashlib
 import os
+import sys
 
 import requests
 import typer
@@ -11,6 +12,7 @@ import urllib3.exceptions
 from rich.console import Console
 from rich.table import Table
 
+from ._version import __version__
 from .github_client import GitHubClient
 from .merge_manager import AsyncMergeManager
 from .models import PullRequestInfo
@@ -21,7 +23,27 @@ from .resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
 # Constants
 MAX_RETRIES = 2
 
-app = typer.Typer(
+
+def version_callback(value: bool):
+    """Callback to show version and exit."""
+    if value:
+        console.print(f"🏷️  dependamerge version {__version__}")
+        raise typer.Exit()
+
+
+class CustomTyper(typer.Typer):
+    """Custom Typer class that shows version in help."""
+
+    def __call__(self, *args, **kwargs):
+        # Check if help is being requested
+        import sys
+
+        if "--help" in sys.argv or "-h" in sys.argv:
+            console.print(f"🏷️  dependamerge version {__version__}")
+        return super().__call__(*args, **kwargs)
+
+
+app = CustomTyper(
     help="Find blocked PRs in GitHub organizations and automatically merge pull requests"
 )
 console = Console(markup=False)
@@ -68,6 +90,29 @@ def _validate_override_sha(
     return provided_sha == expected_sha
 
 
+def _generate_continue_sha(
+    pr_info: PullRequestInfo, commit_message_first_line: str
+) -> str:
+    """
+    Generate a SHA hash for continuing after dry-run evaluation.
+
+    Args:
+        pr_info: Source pull request information
+        commit_message_first_line: First line of the commit message
+
+    Returns:
+        SHA256 hash string for continuation
+    """
+    # Create a string combining source PR info for dry-run continuation
+    combined_data = f"continue:{pr_info.repository_full_name}#{pr_info.number}:{commit_message_first_line.strip()}"
+
+    # Generate SHA256 hash
+    sha_hash = hashlib.sha256(combined_data.encode("utf-8")).hexdigest()
+
+    # Return first 16 characters for readability
+    return sha_hash[:16]
+
+
 def _format_condensed_similarity(comparison) -> str:
     """Format similarity comparison result in condensed format."""
     reasons = comparison.reasons
@@ -108,7 +153,9 @@ def _format_condensed_similarity(comparison) -> str:
 def merge(
     pr_url: str = typer.Argument(..., help="GitHub pull request URL"),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Show what changes will apply without making them"
+        False,
+        "--dry-run",
+        help="Show what changes will apply, then prompt to proceed with merge",
     ),
     similarity_threshold: float = typer.Option(
         0.8, "--threshold", help="Similarity threshold for matching PRs (0.0-1.0)"
@@ -139,6 +186,13 @@ def merge(
         False,
         "--dismiss-copilot",
         help="Automatically dismiss unresolved GitHub Copilot review comments",
+    ),
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=version_callback,
+        is_eager=True,
+        help="Show version and exit",
     ),
 ):
     """
@@ -366,11 +420,11 @@ def merge(
             # This ensures clean, consistent evaluation reporting format
             console.print("\n🔍 Dependamerge Evaluation\n")
 
+        # Add source PR to the list for parallel processing
+        all_prs_to_merge = all_similar_prs + [(source_pr, None)]
+
         # Merge PRs in parallel using async merge manager
         async def _merge_parallel():
-            # Add source PR to the list for parallel processing
-            all_prs_to_merge = all_similar_prs + [(source_pr, None)]
-
             async with AsyncMergeManager(
                 token=token,
                 merge_method=merge_method,
@@ -403,6 +457,100 @@ def merge(
             total_to_merge = len(merge_results)
             if dry_run:
                 console.print(f"\n▶️ Mergeable {merged_count}/{total_to_merge} PRs")
+
+                # Generate continuation SHA and prompt user
+                if merged_count > 0:
+                    # Get commit message for SHA generation
+                    commit_messages = github_client.get_pull_request_commits(
+                        owner, repo_name, pr_number
+                    )
+                    first_commit_line = (
+                        commit_messages[0].split("\n")[0] if commit_messages else ""
+                    )
+                    continue_sha_hash = _generate_continue_sha(
+                        source_pr, first_commit_line
+                    )
+                    console.print()
+                    console.print("🚀 To proceed with merging the mergeable PRs:")
+                    console.print(f"💡 Enter the SHA: {continue_sha_hash}")
+
+                    try:
+                        # Skip interactive prompt in test mode
+                        if "pytest" in sys.modules or os.getenv("TESTING"):
+                            console.print(
+                                "⚠️  Test mode detected - skipping interactive prompt"
+                            )
+                            return
+
+                        user_input = input(
+                            "Enter SHA to continue (or press Enter to cancel): "
+                        ).strip()
+                        if user_input == continue_sha_hash:
+                            console.print("✅ SHA validated. Proceeding with merge...")
+
+                            # Run actual merge on mergeable PRs only
+                            console.print(
+                                f"\n🚀 Merging {merged_count} mergeable pull requests..."
+                            )
+                            mergeable_prs = []
+                            for i, result in enumerate(merge_results):
+                                if (
+                                    result.status.value == "merged"
+                                ):  # These were dry-run "merged"
+                                    mergeable_prs.append(all_prs_to_merge[i])
+
+                            # Define async function for real merge
+                            async def _real_merge():
+                                async with AsyncMergeManager(
+                                    token=token,
+                                    merge_method=merge_method,
+                                    max_retries=MAX_RETRIES,
+                                    concurrency=10,
+                                    fix_out_of_date=not no_fix,
+                                    progress_tracker=progress_tracker,
+                                    dry_run=False,  # Real merge this time
+                                    dismiss_copilot=dismiss_copilot,
+                                ) as real_merge_manager:
+                                    return await real_merge_manager.merge_prs_parallel(
+                                        mergeable_prs
+                                    )
+
+                            # Run the real merge
+                            real_results = asyncio.run(_real_merge())
+
+                            # Display final results
+                            final_merged = sum(
+                                1 for r in real_results if r.status.value == "merged"
+                            )
+                            final_failed = sum(
+                                1 for r in real_results if r.status.value == "failed"
+                            )
+                            final_skipped = sum(
+                                1 for r in real_results if r.status.value == "skipped"
+                            )
+                            final_blocked = sum(
+                                1 for r in real_results if r.status.value == "blocked"
+                            )
+
+                            console.print(
+                                f"\n✅ Final Results: {final_merged} merged, {final_failed} failed"
+                            )
+                            if final_skipped > 0:
+                                console.print(f"⏭️  Skipped {final_skipped} PRs")
+                            if final_blocked > 0:
+                                console.print(f"🛑 Blocked {final_blocked} PRs")
+                        elif user_input == "":
+                            console.print("❌ Merge cancelled by user.")
+                        else:
+                            console.print("❌ Invalid SHA. Merge cancelled.")
+                    except KeyboardInterrupt:
+                        console.print("\n❌ Merge cancelled by user.")
+                    except EOFError:
+                        console.print("\n❌ Merge cancelled.")
+
+                    return  # Exit after handling dry-run continuation
+                else:
+                    console.print("\n💡 No PRs are mergeable at this time.")
             else:
                 console.print(f"\n✅ Success {merged_count}/{total_to_merge} PRs")
 
