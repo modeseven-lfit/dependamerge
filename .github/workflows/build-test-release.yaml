@@ -162,6 +162,7 @@ jobs:
           python_version: "${{ matrix.python-version }}"
 
   sbom:
+    name: 'Generate SBOM'
     runs-on: ubuntu-latest
     needs: 'python-build'
     timeout-minutes: 10
@@ -193,8 +194,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@f6601287cdb1efc985d6b765bbf99cb4c0ac29d8  # v7.0.0
         with:
-          path: "${{ steps.sbom.outputs.sbom_json_path }}"
-          format: "cyclonedx-json"
+          sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
 
       - name: "Summary step"
         run: |

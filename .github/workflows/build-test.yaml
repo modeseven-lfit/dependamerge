@@ -108,6 +108,7 @@ jobs:
           python_version: "${{ matrix.python-version }}"
 
   sbom:
+    name: 'Generate SBOM'
     runs-on: ubuntu-latest
     needs: 'python-build'
     timeout-minutes: 10
@@ -115,19 +116,19 @@ jobs:
       contents: read
     steps:
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
 
       - name: "Generate SBOM"
         id: sbom
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-sbom-action@ae4aca2ef28d7da4ec95049cc78be43e632d322a # v0.1.0
+        uses: lfreleng-actions/python-sbom-action@ae4aca2ef28d7da4ec95049cc78be43e632d322a  # v0.1.0
         with:
           include_dev: "false"
           sbom_format: "both"
 
       - name: "Upload SBOM artifacts"
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: sbom-files
           path: |
@@ -137,10 +138,9 @@ jobs:
 
       - name: "Security scan with Grype"
         # yamllint disable-line rule:line-length
-        uses: anchore/scan-action@f6601287cdb1efc985d6b765bbf99cb4c0ac29d8 # v7.0.0
+        uses: anchore/scan-action@f6601287cdb1efc985d6b765bbf99cb4c0ac29d8  # v7.0.0
         with:
-          path: "${{ steps.sbom.outputs.sbom_json_path }}"
-          format: "cyclonedx-json"
+          sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
 
       - name: "Summary step"
         run: |
