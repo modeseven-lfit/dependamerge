@@ -17,7 +17,7 @@ class TestCLI:
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
-    def test_merge_command_dry_run(
+    def test_merge_command_interactive_default(
         self, mock_service_class, mock_comparator_class, mock_client_class
     ):
         # Setup mocks
@@ -116,7 +116,6 @@ class TestCLI:
             [
                 "merge",
                 "https://github.com/owner/repo/pull/22",
-                "--dry-run",
                 "--token",
                 "test_token",
             ],
@@ -242,6 +241,9 @@ class TestCLI:
         )
         mock_client.get_pull_request_info.return_value = mock_pr
         mock_client.get_pr_status_details.return_value = "Ready to merge"
+        mock_client.get_pull_request_commits.return_value = [
+            "pre-commit autoupdate\n\nUpdate pre-commit hooks"
+        ]
 
         # Mock approve and merge methods
         mock_client.approve_pull_request.return_value = True
@@ -269,6 +271,7 @@ class TestCLI:
                 [
                     "merge",
                     "https://github.com/owner/repo/pull/22",
+                    "--no-confirm",
                     "--token",
                     "test_token",
                 ],
@@ -524,3 +527,88 @@ class TestCLI:
         # Invalid SHA should fail validation
         assert _validate_override_sha("invalid_sha", mock_pr, commit_message) is False
         assert _validate_override_sha("", mock_pr, commit_message) is False
+
+    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.github_service.GitHubService")
+    @patch("dependamerge.merge_manager.GitHubAsync")
+    def test_merge_command_no_confirm_flag(
+        self,
+        mock_async_class,
+        mock_service_class,
+        mock_comparator_class,
+        mock_client_class,
+    ):
+        """Test that --no-confirm flag skips confirmation and merges immediately."""
+        # Setup mocks
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        mock_comparator = Mock()
+        mock_comparator_class.return_value = mock_comparator
+
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
+
+        mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
+        mock_client.is_automation_author.return_value = True
+
+        # Mock a repository with no similar PRs to test direct merge
+        mock_repo = Mock()
+        mock_repo.full_name = "owner/other-repo"
+        mock_client.get_organization_repositories.return_value = [mock_repo]
+        mock_client.get_open_pull_requests.return_value = []
+
+        mock_pr = PullRequestInfo(
+            number=22,
+            title="Bump requests from 2.28.0 to 2.28.1",
+            body="Test body",
+            author="dependabot[bot]",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="dependabot/pip/requests-2.28.1",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+
+        mock_client.get_pull_request_info.return_value = mock_pr
+        mock_client.get_pr_status_details.return_value = "Ready to merge"
+
+        # Mock GitHubAsync for AsyncMergeManager
+        mock_github_async = Mock()
+        mock_async_class.return_value = mock_github_async
+        mock_github_async.__aenter__ = AsyncMock(return_value=mock_github_async)
+        mock_github_async.__aexit__ = AsyncMock(return_value=None)
+        mock_github_async.merge_pull_request = AsyncMock(return_value=True)
+
+        # Mock no similar PRs found
+        async def mock_find_similar_prs(*args, **kwargs):
+            return []
+
+        async def mock_close():
+            return None
+
+        mock_service.find_similar_prs = mock_find_similar_prs
+        mock_service.close = mock_close
+
+        result = self.runner.invoke(
+            app,
+            [
+                "merge",
+                "https://github.com/owner/repo/pull/22",
+                "--no-confirm",
+                "--token",
+                "test_token",
+            ],
+        )
+
+        assert result.exit_code == 0
+        # Should NOT contain the interactive evaluation message
+        assert "Dependamerge Evaluation" not in result.stdout
+        # Should show direct merge output
+        assert "📈 Final Results:" in result.stdout

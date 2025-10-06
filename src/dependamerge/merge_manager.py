@@ -505,7 +505,7 @@ class AsyncMergeManager:
                     if self.progress_tracker:
                         self.progress_tracker.merge_success()
                     # Single line summary for successful dry-run
-                    self._console.print(f"✅ Approve/merge: {pr_info.html_url}")
+                    self._console.print(f"☑️ Approve/merge: {pr_info.html_url}")
             else:
                 if self.progress_tracker:
                     self.progress_tracker.update_operation(

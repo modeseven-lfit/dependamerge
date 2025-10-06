@@ -85,7 +85,8 @@ origin.
   command
 - **Security Features**: SHA-based authentication for non-automation PRs
   ensures authorized bulk merges
-- **Interactive Dry Run Mode**: Preview what changes will apply, then optionally proceed with merge
+- **Interactive Mode by Default**: Preview what changes will apply, then
+  optionally proceed with merge
 
 ### General Features
 
@@ -323,21 +324,24 @@ dependamerge merge \
 
 ### Dry Run (Interactive Preview Mode)
 
-The dry-run mode shows you exactly what PRs would be merged, then prompts you to continue:
+By default, dependamerge runs in interactive mode showing you what PRs the tool
+will merge, then prompts you to continue:
 
 ```bash
-dependamerge merge https://github.com/owner/repo/pull/123 --dry-run
+dependamerge merge https://github.com/owner/repo/pull/123
 ```
 
 **Interactive Flow:**
-1. Analyzes and shows similar PRs that would be merged
+
+1. Analyzes and shows similar PRs that the tool will merge
 2. Displays merge evaluation results
 3. Generates a unique SHA for security validation
 4. Prompts you to enter the SHA to proceed with actual merging
-5. Only merges PRs that were shown as "mergeable" in the dry-run
+5. Merges PRs that appear as "mergeable" in the dry-run
 
 **Example Output:**
-```
+
+```bash
 🔍 Dependamerge Evaluation
 
 ✅ Approve/merge: https://github.com/org/repo1/pull/45
@@ -346,10 +350,14 @@ dependamerge merge https://github.com/owner/repo/pull/123 --dry-run
 
 ▶️ Mergeable 2/3 PRs
 
-🚀 To proceed with merging the mergeable PRs:
-💡 Enter the SHA: abc123def456
-Enter SHA to continue (or press Enter to cancel): abc123def456
-✅ SHA validated. Proceeding with merge...
+➡️ To proceed with merging enter: abc123def456
+Enter the string above to continue (or press Enter to cancel):
+
+🔨 Merging 2 mergeable pull requests...
+✅ Success: https://github.com/org/repo1/pull/45
+✅ Success: https://github.com/org/repo3/pull/89
+
+🚀 Final Results: 2 merged, 0 failed
 ```
 
 ### Custom Merge Options
@@ -375,7 +383,8 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 
 #### Merge Command Options
 
-- `--dry-run`: Show what changes will apply, then prompt to proceed with merge
+- `--no-confirm`: Skip confirmation prompt and merge without delay (default is
+  interactive mode)
 - `--threshold FLOAT`: Similarity threshold for matching PRs (0.0-1.0,
   default: 0.8)
 - `--merge-method TEXT`: Merge method - merge, squash, or rebase (default:
@@ -480,14 +489,15 @@ The `--dismiss-copilot` flag automatically resolves blocking Copilot reviews
 using the most appropriate method:
 
 ```bash
-# Merge with automatic Copilot review resolution
+# Merge with automatic Copilot review resolution (interactive mode)
 dependamerge merge https://github.com/myorg/repo1/pull/67 --dismiss-copilot
 
-# Interactive dry run to see which Copilot items the tool will resolve, then choose to proceed
-dependamerge merge https://github.com/myorg/repo1/pull/67 --dismiss-copilot --dry-run
-
-# With Copilot dismissal enabled
+# Interactive mode to see which Copilot items the tool will resolve, then
+# choose to proceed (default behavior)
 dependamerge merge https://github.com/myorg/repo1/pull/67 --dismiss-copilot
+
+# Skip confirmation and merge without delay with Copilot dismissal
+dependamerge merge https://github.com/myorg/repo1/pull/67 --dismiss-copilot --no-confirm
 ```
 
 **Comprehensive Resolution Strategy**: The tool automatically uses the most
@@ -507,7 +517,7 @@ coverage without requiring user intervention.
 ```bash
 # See what changes will apply (default: fix out-of-date branches)
 dependamerge merge https://github.com/myorg/repo1/pull/78 \
-  --dry-run --threshold 0.9 --progress
+  --threshold 0.9 --progress
 ```
 
 ## Safety Features
@@ -522,7 +532,8 @@ dependamerge merge https://github.com/myorg/repo1/pull/78 \
   blocked by checks, etc.)
 - **Similarity Threshold**: Configurable confidence threshold prevents incorrect
   matches
-- **Interactive Dry Run Mode**: Always test with `--dry-run` first - it shows results then lets you choose to proceed
+- **Interactive Mode by Default**: Shows results then lets you choose to
+  proceed (use `--no-confirm` to skip)
 - **Detailed Logging**: Shows which PRs match and why they match
 
 ### Security for All PRs
@@ -671,7 +682,8 @@ Solution: Add workflow/actions permissions:
 
 - Check that other repositories have open automation PRs
 - Try lowering the similarity threshold with `--threshold 0.7`
-- Use `--dry-run` to see detailed matching information and optionally proceed with merge
+- Use interactive mode (default) to see detailed matching information and
+  optionally proceed with merge
 
 #### Merge Failures
 
@@ -684,7 +696,7 @@ Solution: Add workflow/actions permissions:
 - Check the command help (local dev): `uv run dependamerge --help`
 - For PyPI usage: `uvx dependamerge --help`
 - Enable verbose output with environment variables
-- Review similarity scoring in interactive dry-run mode (`--dry-run`)
+- Review similarity scoring in interactive mode (default behavior)
 
 ## Security Considerations
 
