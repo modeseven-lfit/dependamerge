@@ -101,7 +101,7 @@ def test_final_verification():
             # Run the CLI command
             merge(
                 pr_url="https://github.com/owner/repo/pull/22",
-                dry_run=False,
+                no_confirm=True,
                 similarity_threshold=0.8,
                 merge_method="merge",
                 token="test_token",

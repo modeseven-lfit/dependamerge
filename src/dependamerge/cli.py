@@ -152,10 +152,10 @@ def _format_condensed_similarity(comparison) -> str:
 @app.command()
 def merge(
     pr_url: str = typer.Argument(..., help="GitHub pull request URL"),
-    dry_run: bool = typer.Option(
+    no_confirm: bool = typer.Option(
         False,
-        "--dry-run",
-        help="Show what changes will apply, then prompt to proceed with merge",
+        "--no-confirm",
+        help="Skip confirmation prompt and merge immediately without dry-run",
     ),
     similarity_threshold: float = typer.Option(
         0.8, "--threshold", help="Similarity threshold for matching PRs (0.0-1.0)"
@@ -197,6 +197,9 @@ def merge(
 ):
     """
     Bulk approve/merge pull requests across a GitHub organization.
+
+    By default, runs in interactive mode showing what changes will apply,
+    then prompts to proceed with merge. Use --no-confirm to merge immediately.
 
     This command will:
 
@@ -415,7 +418,7 @@ def merge(
             console.print(f"  • {target_pr.repository_full_name} #{target_pr.number}")
             console.print(f"    {_format_condensed_similarity(comparison)}")
 
-        if dry_run:
+        if not no_confirm:
             # IMPORTANT: Each PR must produce exactly ONE line of output in this section
             # This ensures clean, consistent evaluation reporting format
             console.print("\n🔍 Dependamerge Evaluation\n")
@@ -432,10 +435,10 @@ def merge(
                 concurrency=10,  # Process up to 10 PRs concurrently
                 fix_out_of_date=not no_fix,  # Fix is default, --no-fix disables it
                 progress_tracker=progress_tracker,
-                dry_run=dry_run,
+                dry_run=not no_confirm,
                 dismiss_copilot=dismiss_copilot,
             ) as merge_manager:
-                if dry_run:
+                if not no_confirm:
                     pass  # No merge message in dry-run mode
                 else:
                     console.print(
@@ -455,8 +458,8 @@ def merge(
             skipped_count = sum(1 for r in merge_results if r.status.value == "skipped")
             blocked_count = sum(1 for r in merge_results if r.status.value == "blocked")
             total_to_merge = len(merge_results)
-            if dry_run:
-                console.print(f"\n▶️ Mergeable {merged_count}/{total_to_merge} PRs")
+            if not no_confirm:
+                console.print(f"\nMergeable {merged_count}/{total_to_merge} PRs")
 
                 # Generate continuation SHA and prompt user
                 if merged_count > 0:
@@ -471,8 +474,7 @@ def merge(
                         source_pr, first_commit_line
                     )
                     console.print()
-                    console.print("🚀 To proceed with merging the mergeable PRs:")
-                    console.print(f"💡 Enter the SHA: {continue_sha_hash}")
+                    console.print(f"To proceed with merging enter: {continue_sha_hash}")
 
                     try:
                         # Skip interactive prompt in test mode
@@ -483,14 +485,12 @@ def merge(
                             return
 
                         user_input = input(
-                            "Enter SHA to continue (or press Enter to cancel): "
+                            "Enter the string above to continue (or press Enter to cancel): "
                         ).strip()
                         if user_input == continue_sha_hash:
-                            console.print("✅ SHA validated. Proceeding with merge...")
-
                             # Run actual merge on mergeable PRs only
                             console.print(
-                                f"\n🚀 Merging {merged_count} mergeable pull requests..."
+                                f"\n🔨 Merging {merged_count} mergeable pull requests..."
                             )
                             mergeable_prs = []
                             for i, result in enumerate(merge_results):
@@ -533,7 +533,7 @@ def merge(
                             )
 
                             console.print(
-                                f"\n✅ Final Results: {final_merged} merged, {final_failed} failed"
+                                f"\n🚀 Final Results: {final_merged} merged, {final_failed} failed"
                             )
                             if final_skipped > 0:
                                 console.print(f"⏭️  Skipped {final_skipped} PRs")
@@ -542,7 +542,7 @@ def merge(
                         elif user_input == "":
                             console.print("❌ Merge cancelled by user.")
                         else:
-                            console.print("❌ Invalid SHA. Merge cancelled.")
+                            console.print("❌ Invalid input. Merge cancelled.")
                     except KeyboardInterrupt:
                         console.print("\n❌ Merge cancelled by user.")
                     except EOFError:
@@ -555,7 +555,7 @@ def merge(
                 console.print(f"\n✅ Success {merged_count}/{total_to_merge} PRs")
 
             if failed_count > 0:
-                if dry_run:
+                if not no_confirm:
                     console.print(f"❌ Would fail to merge {failed_count} PRs")
                 else:
                     console.print(f"❌ Failed {failed_count} PRs")
@@ -564,7 +564,7 @@ def merge(
             if blocked_count > 0:
                 console.print(f"🛑 Blocked {blocked_count} PRs")
 
-            if not dry_run:
+            if no_confirm:
                 console.print(
                     f"📈 Final Results: {merged_count} merged, {failed_count} failed"
                 )
