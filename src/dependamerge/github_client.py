@@ -271,6 +271,10 @@ class GitHubClient:
         if pr_info.mergeable is True and pr_info.mergeable_state == "clean":
             return "Ready to merge"
 
+        # Handle unstable state - this usually means CI is running but PR is mergeable
+        if pr_info.mergeable is True and pr_info.mergeable_state == "unstable":
+            return "Ready to merge"
+
         # For any other combination where mergeable is True but state is unclear
         if pr_info.mergeable is True:
             return "Ready to merge"
