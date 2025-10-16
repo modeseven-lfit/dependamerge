@@ -331,9 +331,10 @@ class GitHubClient:
                     except Exception:
                         pass
 
-                    # Check runs - look for failing (check this first as it's most specific)
+                    # Check runs and status contexts - look for failing (check this first as it's most specific)
                     failing_checks = []
                     try:
+                        # Check runs (newer GitHub Apps API)
                         runs = await api.get(
                             f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/check-runs"
                         )
@@ -341,6 +342,21 @@ class GitHubClient:
                             conclusion = run.get("conclusion")
                             if conclusion in ["failure", "cancelled", "timed_out"]:
                                 failing_checks.append(run.get("name", "unknown"))
+                    except Exception:
+                        pass
+
+                    try:
+                        # Status contexts (older status API, used by services like pre-commit.ci)
+                        statuses = await api.get(
+                            f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/status"
+                        )
+                        for status in statuses.get("statuses") or []:
+                            state = status.get("state")
+                            if state in ["failure", "error"]:
+                                context = status.get("context", "unknown")
+                                # Avoid duplicates if both check-run and status exist for same service
+                                if context not in failing_checks:
+                                    failing_checks.append(context)
                     except Exception:
                         pass
 

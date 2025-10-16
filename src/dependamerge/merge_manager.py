@@ -945,17 +945,48 @@ class AsyncMergeManager:
 
     def _get_failure_summary(self, pr_info: PullRequestInfo) -> str:
         """
-        Generate a concise failure summary based on PR state.
+        Generate a detailed failure summary based on PR state.
 
         Args:
             pr_info: Pull request information
 
         Returns:
-            Brief description of why the merge failed
+            Detailed description of why the merge failed
         """
         if pr_info.mergeable_state == "behind":
             return "behind base branch"
         elif pr_info.mergeable_state == "blocked":
+            # Use detailed block analysis for blocked PRs
+            try:
+                from .github_client import GitHubClient
+
+                client = GitHubClient(token=self.token)
+                detailed_reason = client._analyze_block_reason(pr_info)
+                # Convert the detailed reason to a more concise format for console output
+                if detailed_reason.startswith("Blocked by failing check:"):
+                    check_name = detailed_reason.replace(
+                        "Blocked by failing check: ", ""
+                    )
+                    return f"failing check: {check_name}"
+                elif (
+                    detailed_reason.startswith("Blocked by")
+                    and "failing checks" in detailed_reason
+                ):
+                    return detailed_reason.replace("Blocked by ", "").lower()
+                elif "Human reviewer requested changes" in detailed_reason:
+                    return "human reviewer requested changes"
+                elif "Copilot" in detailed_reason:
+                    return detailed_reason.replace("Blocked by ", "").lower()
+                elif "branch protection" in detailed_reason.lower():
+                    return "branch protection rules prevent merge"
+                else:
+                    return detailed_reason.replace("Blocked by ", "").lower()
+            except Exception as e:
+                self.log.debug(f"Failed to get detailed block reason: {e}")
+                # Fallback to generic message
+                pass
+
+            # Fallback logic when detailed analysis fails
             if pr_info.mergeable is True:
                 return "branch protection rules prevent merge"
             else:
@@ -966,6 +997,26 @@ class AsyncMergeManager:
             return "draft PR"
         elif pr_info.mergeable is False:
             return "cannot update protected ref - organization or branch protection rules prevent merge"
+        elif pr_info.mergeable_state == "unknown":
+            # For unknown state, try to get more details using the GitHub client
+            try:
+                from .github_client import GitHubClient
+
+                client = GitHubClient(token=self.token)
+                detailed_reason = client._analyze_block_reason(pr_info)
+                if "failing check" in detailed_reason.lower():
+                    if detailed_reason.startswith("Blocked by failing check:"):
+                        check_name = detailed_reason.replace(
+                            "Blocked by failing check: ", ""
+                        )
+                        return f"failing check: {check_name}"
+                    else:
+                        return detailed_reason.replace("Blocked by ", "").lower()
+                else:
+                    return detailed_reason.replace("Blocked by ", "").lower()
+            except Exception as e:
+                self.log.debug(f"Failed to analyze unknown state: {e}")
+                return "status checks pending or failed"
         else:
             return f"merge failed: {pr_info.mergeable_state}"
 
