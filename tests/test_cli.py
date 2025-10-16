@@ -141,7 +141,7 @@ class TestCLI:
         )
 
         assert result.exit_code == 1
-        assert "❌ Unexpected error:" in result.stdout
+        assert "❌ Error during merge operation" in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")
     def test_merge_command_non_automation_pr(self, mock_client_class):
@@ -392,7 +392,7 @@ class TestCLI:
             ],
         )
 
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         assert "Invalid override SHA" in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")

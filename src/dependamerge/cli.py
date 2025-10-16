@@ -13,6 +13,21 @@ from rich.console import Console
 from rich.table import Table
 
 from ._version import __version__
+from .error_codes import (
+    DependamergeError,
+    ExitCode,
+    convert_git_error,
+    convert_github_api_error,
+    convert_network_error,
+    exit_for_configuration_error,
+    exit_for_github_api_error,
+    exit_for_pr_state_error,
+    exit_with_error,
+    is_github_api_permission_error,
+    is_network_error,
+)
+from .git_ops import GitError
+from .github_async import GraphQLError, RateLimitError, SecondaryRateLimitError
 from .github_client import GitHubClient
 from .merge_manager import AsyncMergeManager
 from .models import PullRequestInfo
@@ -263,8 +278,9 @@ def merge(
             if source_pr.state != "open":
                 if progress_tracker:
                     progress_tracker.stop()
-                console.print(f"🛑 Failed: {pr_url} [already closed]")
-                raise typer.Exit(1)
+                exit_for_pr_state_error(
+                    pr_number, "closed", details="Pull request has been closed"
+                )
         except (
             urllib3.exceptions.NameResolutionError,
             urllib3.exceptions.MaxRetryError,
@@ -272,12 +288,23 @@ def merge(
             requests.exceptions.Timeout,
             requests.exceptions.RequestException,
         ) as e:
-            console.print(
-                "Network Error: Failed to connect to GitHub API while fetching source PR."
-            )
-            console.print(f"Details: {e}")
-            console.print("Please check your internet connection and try again.")
-            raise typer.Exit(1) from e
+            if is_network_error(e):
+                exit_with_error(
+                    ExitCode.NETWORK_ERROR,
+                    details="Failed to fetch PR details from GitHub API",
+                    exception=e,
+                )
+            elif is_github_api_permission_error(e):
+                exit_for_github_api_error(
+                    details="Failed to fetch PR details", exception=e
+                )
+            else:
+                exit_with_error(
+                    ExitCode.GENERAL_ERROR,
+                    message="❌ Failed to fetch PR details",
+                    details=str(e),
+                    exception=e,
+                )
 
         # Display source PR info
         _display_pr_info(
@@ -329,11 +356,12 @@ def merge(
 
             # Validate provided override SHA
             if not _validate_override_sha(override, source_pr, first_commit_line):
-                console.print(
-                    "Error: Invalid override SHA. Expected SHA for this PR and author is:"
+                # Use the already generated expected_sha for error message
+                exit_with_error(
+                    ExitCode.VALIDATION_ERROR,
+                    message="❌ Invalid override SHA provided",
+                    details=f"Expected SHA for this PR and author: --override {expected_sha}",
                 )
-                console.print(f"--override {expected_sha}")
-                raise typer.Exit(1)
 
             console.print(
                 "Override SHA validated. Proceeding with non-automation PR merge."
@@ -354,12 +382,23 @@ def merge(
             requests.exceptions.Timeout,
             requests.exceptions.RequestException,
         ) as e:
-            console.print(
-                "Network Error: Failed to connect to GitHub API while fetching organization repositories."
-            )
-            console.print(f"Details: {e}")
-            console.print("Please check your internet connection and try again.")
-            raise typer.Exit(1) from e
+            if is_network_error(e):
+                exit_with_error(
+                    ExitCode.NETWORK_ERROR,
+                    details="Failed to fetch organization repositories from GitHub API",
+                    exception=e,
+                )
+            elif is_github_api_permission_error(e):
+                exit_for_github_api_error(
+                    details="Failed to fetch organization repositories", exception=e
+                )
+            else:
+                exit_with_error(
+                    ExitCode.GENERAL_ERROR,
+                    message="❌ Failed to fetch organization repositories",
+                    details=str(e),
+                    exception=e,
+                )
         console.print(f"Found {len(repositories)} repositories")
         #     progress.update(task, description=f"Found {len(repositories)} repositories")
 
@@ -585,18 +624,49 @@ def merge(
         else:
             console.print("❌ No PRs were processed")
 
+    except DependamergeError as exc:
+        # Our structured errors handle display and exit themselves
+        if progress_tracker:
+            progress_tracker.stop()
+        exc.display_and_exit()
+    except (KeyboardInterrupt, SystemExit):
+        # Don't catch system interrupts or exits
+        if progress_tracker:
+            progress_tracker.stop()
+        raise
     except typer.Exit:
         # Handle typer exits (like closed PR errors) gracefully - already printed message
         if progress_tracker:
             progress_tracker.stop()
         # Re-raise without additional error messages
         raise
+    except (GitError, RateLimitError, SecondaryRateLimitError, GraphQLError) as exc:
+        # Convert known errors to centralized error handling
+        if progress_tracker:
+            progress_tracker.stop()
+        if isinstance(exc, GitError):
+            converted_error = convert_git_error(exc)
+        else:  # GitHub API errors
+            converted_error = convert_github_api_error(exc)
+        converted_error.display_and_exit()
     except Exception as e:
         # Ensure progress tracker is stopped even if an unexpected error occurs
         if progress_tracker:
             progress_tracker.stop()
-        console.print(f"❌ Unexpected error: {e}")
-        raise typer.Exit(1) from e
+
+        # Try to categorize the error
+        if is_github_api_permission_error(e):
+            exit_for_github_api_error(exception=e)
+        elif is_network_error(e):
+            converted_error = convert_network_error(e)
+            converted_error.display_and_exit()
+        else:
+            exit_with_error(
+                ExitCode.GENERAL_ERROR,
+                message="❌ Error during merge operation",
+                details=str(e),
+                exception=e,
+            )
 
 
 def _display_pr_info(
@@ -773,10 +843,10 @@ def blocked(
 
             token_to_use = token or os.getenv("GITHUB_TOKEN")
             if not token_to_use:
-                console.print(
-                    "A GitHub token is required for --fix. Provide --token or set GITHUB_TOKEN."
+                exit_for_configuration_error(
+                    message="❌ GitHub token required for --fix option",
+                    details="Provide --token or set GITHUB_TOKEN environment variable",
                 )
-                raise typer.Exit(1)
 
             console.print(f"Starting interactive fix for {len(selections)} PR(s)...")
             try:
@@ -800,20 +870,55 @@ def blocked(
                     f"✅ Fix complete: {success_count}/{len(selections)} succeeded"
                 )
             except Exception as e:
-                console.print(f"Error during fix workflow: {e}")
-                raise typer.Exit(1) from e
+                exit_with_error(
+                    ExitCode.GENERAL_ERROR,
+                    message="❌ Error during fix workflow",
+                    details=str(e),
+                    exception=e,
+                )
 
+    except DependamergeError as exc:
+        # Our structured errors handle display and exit themselves
+        if progress_tracker:
+            progress_tracker.stop()
+        exc.display_and_exit()
+    except (KeyboardInterrupt, SystemExit):
+        # Don't catch system interrupts or exits
+        if progress_tracker:
+            progress_tracker.stop()
+        raise
     except typer.Exit as e:
         # Handle typer exits gracefully
         if progress_tracker:
             progress_tracker.stop()
         raise e
+    except (GitError, RateLimitError, SecondaryRateLimitError, GraphQLError) as exc:
+        # Convert known errors to centralized error handling
+        if progress_tracker:
+            progress_tracker.stop()
+        if isinstance(exc, GitError):
+            converted_error = convert_git_error(exc)
+        else:  # GitHub API errors
+            converted_error = convert_github_api_error(exc)
+        converted_error.display_and_exit()
     except Exception as e:
         # Ensure progress tracker is stopped even if an error occurs
         if progress_tracker:
             progress_tracker.stop()
-        console.print(f"❌ Unexpected error: {e}")
-        raise typer.Exit(1) from e
+
+        # Try to categorize the error
+        if is_github_api_permission_error(e):
+            exit_for_github_api_error(exception=e)
+        elif is_network_error(e):
+            converted_error = convert_network_error(e)
+            converted_error.display_and_exit()
+        else:
+            exit_with_error(
+                ExitCode.GENERAL_ERROR,
+                message="❌ Error during organization scan",
+                details=str(e),
+                exception=e,
+            )
 
 
 def _display_blocked_results(scan_result, output_format: str):
