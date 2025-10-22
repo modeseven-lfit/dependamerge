@@ -289,101 +289,22 @@ class GitHubClient:
 
             repo_owner, repo_name = pr_info.repository_full_name.split("/")
 
+            # Check if we're already in an event loop
+            try:
+                asyncio.get_running_loop()
+                # We're in an async context - can't use asyncio.run()
+                # Return a basic status message to avoid the coroutine warning
+                # The caller should use the async version instead
+                return "Blocked by branch protection"
+            except RuntimeError:
+                # No event loop running - safe to use asyncio.run()
+                pass
+
             async def _run():
                 async with GitHubAsync(token=self.token) as api:
-                    # Reviews
-                    approved = False
-                    human_changes_requested = False
-                    unresolved_copilot_reviews = 0
-                    unresolved_copilot_comments = 0
-
-                    try:
-                        reviews = await api.get(
-                            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}/reviews"
-                        )
-                        for review in reviews:
-                            state = review.get("state")
-                            author = review.get("user", {}).get("login", "")
-
-                            if state == "APPROVED":
-                                approved = True
-                            elif state == "CHANGES_REQUESTED":
-                                if author == "github-copilot[bot]":
-                                    unresolved_copilot_reviews += 1
-                                else:
-                                    human_changes_requested = True
-                    except Exception:
-                        pass
-
-                    # Check for unresolved review comments
-                    try:
-                        comments = await api.get(
-                            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}/comments"
-                        )
-                        for comment in comments:
-                            author = comment.get("user", {}).get("login", "")
-                            # Count unresolved Copilot comments (those without replies dismissing them)
-                            if author == "github-copilot[bot]":
-                                # Simple heuristic: if comment doesn't have "DISMISSED" or similar resolution text
-                                body = comment.get("body", "").lower()
-                                if "dismissed" not in body and "resolved" not in body:
-                                    unresolved_copilot_comments += 1
-                    except Exception:
-                        pass
-
-                    # Check runs and status contexts - look for failing (check this first as it's most specific)
-                    failing_checks = []
-                    try:
-                        # Check runs (newer GitHub Apps API)
-                        runs = await api.get(
-                            f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/check-runs"
-                        )
-                        for run in runs.get("check_runs") or []:
-                            conclusion = run.get("conclusion")
-                            if conclusion in ["failure", "cancelled", "timed_out"]:
-                                failing_checks.append(run.get("name", "unknown"))
-                    except Exception:
-                        pass
-
-                    try:
-                        # Status contexts (older status API, used by services like pre-commit.ci)
-                        statuses = await api.get(
-                            f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/status"
-                        )
-                        for status in statuses.get("statuses") or []:
-                            state = status.get("state")
-                            if state in ["failure", "error"]:
-                                context = status.get("context", "unknown")
-                                # Avoid duplicates if both check-run and status exist for same service
-                                if context not in failing_checks:
-                                    failing_checks.append(context)
-                    except Exception:
-                        pass
-
-                    # Prioritize blocking conditions by specificity
-                    # Most specific blockers first
-                    if failing_checks:
-                        if len(failing_checks) == 1:
-                            return f"Blocked by failing check: {failing_checks[0]}"
-                        else:
-                            return f"Blocked by {len(failing_checks)} failing checks"
-
-                    if human_changes_requested:
-                        return "Human reviewer requested changes"
-
-                    if unresolved_copilot_reviews > 0:
-                        if unresolved_copilot_comments > 0:
-                            return f"Blocked by {unresolved_copilot_reviews} Copilot reviews, {unresolved_copilot_comments} comments"
-                        else:
-                            return f"Blocked by {unresolved_copilot_reviews} unresolved Copilot reviews"
-
-                    if unresolved_copilot_comments > 0:
-                        return f"Blocked by {unresolved_copilot_comments} unresolved Copilot comments"
-
-                    if not approved:
-                        return "Blocked by branch protection (requires approval)"
-
-                    return "Blocked by branch protection"
+                    return await api.analyze_block_reason(
+                        repo_owner, repo_name, pr_info.number, pr_info.head_sha
+                    )
 
             return asyncio.run(_run())  # type: ignore[no-any-return]
         except Exception:

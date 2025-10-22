@@ -222,10 +222,31 @@ class AsyncMergeManager:
 
             if not self._is_pr_mergeable(pr_info):
                 # Get detailed status for a more informative skip message
-                from .github_client import GitHubClient
+                # Use async method to avoid event loop conflicts
+                repo_owner, repo_name = pr_info.repository_full_name.split("/")
 
-                client = GitHubClient(token=self.token)
-                detailed_status = client.get_pr_status_details(pr_info)
+                # Check if blocked to get more detailed status
+                if pr_info.mergeable_state == "blocked" and self._github_client:
+                    try:
+                        detailed_status = (
+                            await self._github_client.analyze_block_reason(
+                                repo_owner, repo_name, pr_info.number, pr_info.head_sha
+                            )
+                        )
+                    except Exception:
+                        detailed_status = f"Blocked (state: {pr_info.mergeable_state})"
+                else:
+                    # For non-blocked states, provide basic status
+                    if pr_info.mergeable_state == "dirty":
+                        detailed_status = "Merge conflicts"
+                    elif pr_info.mergeable_state == "behind":
+                        detailed_status = "Rebase required (out of date)"
+                    elif pr_info.mergeable_state == "draft":
+                        detailed_status = "Draft PR"
+                    else:
+                        detailed_status = (
+                            f"Not mergeable (state: {pr_info.mergeable_state})"
+                        )
 
                 # Use the detailed status as the skip reason, with fallback
                 if detailed_status and detailed_status != "Status unclear":
