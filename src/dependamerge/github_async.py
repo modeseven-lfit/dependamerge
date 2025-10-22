@@ -605,6 +605,118 @@ class GitHubAsync:
         """
         await self.put(f"/repos/{owner}/{repo}/pulls/{number}/update-branch")
 
+    async def analyze_block_reason(
+        self, owner: str, repo: str, number: int, head_sha: str
+    ) -> str:
+        """
+        Analyze why a PR is blocked and return appropriate status.
+
+        This is the async version that should be used from async contexts.
+        """
+        # Reviews
+        approved = False
+        human_changes_requested = False
+        unresolved_copilot_reviews = 0
+        unresolved_copilot_comments = 0
+
+        try:
+            reviews = await self.get(f"/repos/{owner}/{repo}/pulls/{number}/reviews")
+            if isinstance(reviews, list):
+                for review in reviews:
+                    if not isinstance(review, dict):
+                        continue
+                    state = review.get("state")
+                    author = review.get("user", {}).get("login", "")
+
+                    if state == "APPROVED":
+                        approved = True
+                    elif state == "CHANGES_REQUESTED":
+                        if author == "github-copilot[bot]":
+                            unresolved_copilot_reviews += 1
+                        else:
+                            human_changes_requested = True
+        except Exception:
+            pass
+
+        # Check for unresolved review comments
+        try:
+            comments = await self.get(f"/repos/{owner}/{repo}/pulls/{number}/comments")
+            if isinstance(comments, list):
+                for comment in comments:
+                    if not isinstance(comment, dict):
+                        continue
+                    author = comment.get("user", {}).get("login", "")
+                    # Count unresolved Copilot comments (those without replies dismissing them)
+                    if author == "github-copilot[bot]":
+                        # Simple heuristic: if comment doesn't have "DISMISSED" or similar resolution text
+                        body = comment.get("body", "").lower()
+                        if "dismissed" not in body and "resolved" not in body:
+                            unresolved_copilot_comments += 1
+        except Exception:
+            pass
+
+        # Check runs and status contexts - look for failing (check this first as it's most specific)
+        failing_checks = []
+        try:
+            # Check runs (newer GitHub Apps API)
+            runs = await self.get(
+                f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
+            )
+            if isinstance(runs, dict):
+                for run in runs.get("check_runs") or []:
+                    if not isinstance(run, dict):
+                        continue
+                    conclusion = run.get("conclusion")
+                    if conclusion in ["failure", "cancelled", "timed_out"]:
+                        failing_checks.append(run.get("name", "unknown"))
+        except Exception:
+            pass
+
+        try:
+            # Status contexts (older status API, used by services like pre-commit.ci)
+            statuses = await self.get(
+                f"/repos/{owner}/{repo}/commits/{head_sha}/status"
+            )
+            if isinstance(statuses, dict):
+                for status in statuses.get("statuses") or []:
+                    if not isinstance(status, dict):
+                        continue
+                    state = status.get("state")
+                    if state in ["failure", "error"]:
+                        context = status.get("context", "unknown")
+                        # Avoid duplicates if both check-run and status exist for same service
+                        if context not in failing_checks:
+                            failing_checks.append(context)
+        except Exception:
+            pass
+
+        # Prioritize blocking conditions by specificity
+        # Most specific blockers first
+        if failing_checks:
+            if len(failing_checks) == 1:
+                return f"Blocked by failing check: {failing_checks[0]}"
+            else:
+                return f"Blocked by {len(failing_checks)} failing checks"
+
+        if human_changes_requested:
+            return "Human reviewer requested changes"
+
+        if unresolved_copilot_reviews > 0:
+            if unresolved_copilot_comments > 0:
+                return f"Blocked by {unresolved_copilot_reviews} Copilot reviews, {unresolved_copilot_comments} comments"
+            else:
+                return f"Blocked by {unresolved_copilot_reviews} unresolved Copilot reviews"
+
+        if unresolved_copilot_comments > 0:
+            return (
+                f"Blocked by {unresolved_copilot_comments} unresolved Copilot comments"
+            )
+
+        if not approved:
+            return "Blocked by branch protection (requires approval)"
+
+        return "Blocked by branch protection"
+
     # -----------------------
     # Optional REST pagination
     # -----------------------

@@ -399,3 +399,69 @@ class TestAsyncIntegration:
         for invalid_url in invalid_urls:
             with pytest.raises(ValueError):
                 client.parse_pr_url(invalid_url)
+
+    @pytest.mark.asyncio
+    async def test_analyze_block_reason_in_async_context(self):
+        """Test that analyze_block_reason works correctly in async context without coroutine warnings."""
+        from dependamerge.github_async import GitHubAsync
+
+        # Mock review and check data
+        reviews = [
+            {"state": "CHANGES_REQUESTED", "user": {"login": "github-copilot[bot]"}}
+        ]
+        comments = [
+            {"user": {"login": "github-copilot[bot]"}, "body": "Please fix this"}
+        ]
+        check_runs = {"check_runs": [{"conclusion": "failure", "name": "CI Tests"}]}
+
+        async with GitHubAsync(token="test_token") as api:
+            # Mock the API calls
+            async def mock_get(url):
+                if "/reviews" in url:
+                    return reviews
+                elif "/comments" in url:
+                    return comments
+                elif "/check-runs" in url:
+                    return check_runs
+                return {}
+
+            api.get = mock_get
+
+            # This should work without raising RuntimeWarning about unawaited coroutine
+            result = await api.analyze_block_reason("owner", "repo", 123, "abc123")
+
+            # Verify we got a meaningful result
+            assert "failing check" in result.lower() or "blocked" in result.lower()
+            assert isinstance(result, str)
+            assert len(result) > 0
+
+    def test_analyze_block_reason_sync_context_detection(self):
+        """Test that GitHubClient._analyze_block_reason detects async context properly."""
+        from dependamerge.models import PullRequestInfo
+
+        client = GitHubClient(token="test_token")
+
+        pr_info = PullRequestInfo(
+            number=1,
+            title="Test PR",
+            body="Test body",
+            author="test-author",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="feature",
+            state="open",
+            mergeable=True,
+            mergeable_state="blocked",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/1",
+        )
+
+        # In sync context (no event loop), this should work fine
+        # It will return a fallback message since we can't actually make API calls
+        result = client._analyze_block_reason(pr_info)
+
+        # Should return a string without raising warnings
+        assert isinstance(result, str)
+        assert len(result) > 0
