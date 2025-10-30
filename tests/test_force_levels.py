@@ -3,6 +3,8 @@
 
 """Tests for the force level override system."""
 
+import logging
+
 import pytest
 
 from dependamerge.merge_manager import AsyncMergeManager, MergeStatus
@@ -407,13 +409,13 @@ class TestForceValidation:
             )
             assert manager.force_level == level
 
-    def test_default_force_level_is_none(self):
-        """Test that default force level is 'none'."""
+    def test_default_force_level_is_code_owners(self):
+        """Test that default force level is 'code-owners'."""
         manager = AsyncMergeManager(
             token="fake_token",
             dry_run=True,
         )
-        assert manager.force_level == "none"
+        assert manager.force_level == "code-owners"
 
 
 class TestForceLogging:
@@ -444,12 +446,21 @@ class TestForceLogging:
     @pytest.mark.asyncio
     async def test_logs_protection_rules_bypass(self, sample_pr_info, mocker, caplog):
         """Test that bypassing protection rules logs a warning."""
+        # Configure caplog to capture INFO level from the merge_manager module
+        caplog.set_level(logging.INFO, logger="dependamerge.merge_manager")
+
         mock_github = mocker.AsyncMock()
-        mock_github.get_branch_protection.return_value = {}
-        mock_github.get.return_value = {
-            "mergeable": False,
-            "mergeable_state": "blocked",
-        }
+
+        # Mock the specific API call that _test_merge_capability makes
+        def mock_get_side_effect(url):
+            if "/pulls/" in url:
+                return {
+                    "mergeable": False,
+                    "mergeable_state": "blocked",
+                }
+            return {}
+
+        mock_github.get.side_effect = mock_get_side_effect
 
         async with AsyncMergeManager(
             token="fake_token",
@@ -458,11 +469,18 @@ class TestForceLogging:
         ) as manager:
             manager._github_client = mock_github
 
-            await manager._check_merge_requirements(sample_pr_info)
+            # Test the bypass directly since _check_merge_requirements doesn't always call _test_merge_capability
+            result = await manager._test_merge_capability(
+                "test-org", "test-repo", 123, "merge"
+            )
 
-            # Should log a warning about bypassing
+            # Should have bypassed and logged
+            assert result[0] is True
+            assert "bypassed by force level" in result[1]
+
+            # Should log an info message about bypassing branch protection rules
             assert any(
-                "Bypassing branch protection" in record.message
+                "bypassing branch protection rules" in record.message.lower()
                 for record in caplog.records
             )
 

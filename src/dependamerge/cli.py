@@ -189,7 +189,7 @@ def merge(
     no_confirm: bool = typer.Option(
         False,
         "--no-confirm",
-        help="Skip confirmation prompt and merge immediately without dry-run",
+        help="Skip confirmation prompt and merge immediately",
     ),
     similarity_threshold: float = typer.Option(
         0.8, "--threshold", help="Similarity threshold for matching PRs (0.0-1.0)"
@@ -222,9 +222,9 @@ def merge(
         help="Automatically dismiss unresolved GitHub Copilot review comments",
     ),
     force: str = typer.Option(
-        "none",
+        "code-owners",
         "--force",
-        help="Override level: 'none', 'code-owners', 'protection-rules', 'all' (use with caution)",
+        help="Override level: 'none', 'code-owners', 'protection-rules', 'all' (default: code-owners)",
     ),
 ):
     """
@@ -248,8 +248,8 @@ def merge(
     For user generated bulk PRs, use the --override flag with SHA hash.
 
     Force levels:
-    - none: Respect all protections (default)
-    - code-owners: Bypass code owner review requirements
+    - none: Respect all protections
+    - code-owners: Bypass code owner review requirements (default)
     - protection-rules: Bypass branch protection checks (requires permissions)
     - all: Attempt merge despite most warnings (not recommended)
     """
