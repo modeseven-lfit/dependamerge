@@ -20,7 +20,8 @@ Command-line tool for the management of pull requests in a GitHub organization.
 ## Merge
 
 Bulk approves/merges similar pull requests across different repositories in a
-GitHub organisation. Supports common automation tools:
+GitHub organisation. By default, bypasses code owner review requirements to
+enable automated merging of dependency updates. Supports common automation tools:
 
 - Dependabot
 - pre-commit.ci
@@ -258,8 +259,11 @@ Profile → Settings → Developer settings → Personal access tokens → Token
   - **Up-to-date branches**: PRs may need to be current with the base branch
   - **Copilot review resolution**: When using `--dismiss-copilot`, the tool automatically
     handles all review types using dismissal or thread resolution as appropriate
-- For repositories with **strict branch protection**, the token owner may need
-  **admin permissions** on individual repositories to bypass certain rules
+- **Default behavior**: By default, dependamerge uses `--force=code-owners` to bypass
+  code owner review requirements for automation PRs
+- For repositories with **strict branch protection**, use `--force=protection-rules`
+  or `--force=all`, though the token owner may need **admin permissions** on
+  individual repositories to bypass certain rules
 
 ### Setting Up Authentication
 
@@ -603,6 +607,37 @@ and when branch protection rules are in place, this will result in failed merge
 attempts.
 
 ## Safety Features
+
+### Force Levels
+
+Dependamerge provides configurable safety levels to handle different repository
+protection scenarios:
+
+- **`none`**: Respect all protections and requirements
+- **`code-owners`**: Bypass code owner review requirements (default)
+- **`protection-rules`**: Bypass branch protection checks (requires permissions)
+- **`all`**: Attempt merge despite most warnings (not recommended)
+
+The default `code-owners` level allows automated merging of dependency updates
+even when repositories require code owner reviews, which is the most common
+blocking scenario for automation PRs.
+
+**Examples:**
+
+```bash
+# Use full safety (respect all protections)
+dependamerge merge https://github.com/owner/repo/pull/123 --force=none
+
+# Default behavior (bypass code owner requirements)
+dependamerge merge https://github.com/owner/repo/pull/123
+
+# Bypass branch protection rules (requires admin permissions)
+dependamerge merge https://github.com/owner/repo/pull/123 \
+  --force=protection-rules
+
+# Force merge despite most warnings (use with extreme caution)
+dependamerge merge https://github.com/owner/repo/pull/123 --force=all
+```
 
 ### For All PRs
 

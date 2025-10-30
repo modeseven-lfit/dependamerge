@@ -64,7 +64,7 @@ class AsyncMergeManager:
         progress_tracker: MergeProgressTracker | None = None,
         dry_run: bool = False,
         dismiss_copilot: bool = False,
-        force_level: str = "none",
+        force_level: str = "code-owners",
     ):
         self.token = token
         self.default_merge_method = merge_method
@@ -703,6 +703,10 @@ class AsyncMergeManager:
                                 self.log.warning(
                                     f"⚠️  Bypassing code owner review requirement for {repo_owner}/{repo_name}#{pr_info.number} (--force={self.force_level})"
                                 )
+                            return (
+                                True,
+                                "code owner review requirement bypassed by force level",
+                            )
                         else:
                             return (
                                 False,
@@ -1225,6 +1229,11 @@ class AsyncMergeManager:
 
                 # Check for specific blocking conditions that indicate protection rules
                 if mergeable_state == "blocked" and mergeable is False:
+                    if self.force_level in ["protection-rules", "all"]:
+                        self.log.info(
+                            f"Force level '{self.force_level}' bypassing branch protection rules for {owner}/{repo}#{pr_number}"
+                        )
+                        return True, "branch protection bypassed by force level"
                     return False, "branch protection rules prevent merge"
                 elif mergeable_state == "dirty":
                     return False, "merge conflicts"
@@ -1237,6 +1246,11 @@ class AsyncMergeManager:
                     # Otherwise it's fixable
                 elif mergeable is False and mergeable_state in ["unknown", "blocked"]:
                     # This often indicates hidden branch protection rules
+                    if self.force_level in ["protection-rules", "all"]:
+                        self.log.info(
+                            f"Force level '{self.force_level}' bypassing hidden branch protection rules for {owner}/{repo}#{pr_number}"
+                        )
+                        return True, "hidden branch protection bypassed by force level"
                     return (
                         False,
                         "cannot update protected ref - organization or branch protection rules prevent merge",
@@ -1278,11 +1292,21 @@ class AsyncMergeManager:
                 "protected ref" in error_msg.lower()
                 or "cannot update" in error_msg.lower()
             ):
+                if self.force_level in ["protection-rules", "all"]:
+                    self.log.info(
+                        f"Force level '{self.force_level}' bypassing protected ref error for {owner}/{repo}#{pr_number}"
+                    )
+                    return True, "protected ref error bypassed by force level"
                 return (
                     False,
                     "cannot update protected ref - organization or branch protection rules prevent merge",
                 )
             elif "403" in error_msg:
+                if self.force_level == "all":
+                    self.log.info(
+                        f"Force level 'all' attempting to bypass permissions error for {owner}/{repo}#{pr_number}"
+                    )
+                    return True, "permissions error bypassed by force level"
                 return (
                     False,
                     "insufficient permissions or branch protection rules prevent merge",
