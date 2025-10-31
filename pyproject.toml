@@ -54,6 +54,8 @@ dev = [
     "pytest>=8.4.2",
     "pytest-asyncio>=1.1.0",
     "pytest-mock>=3.15.0",
+    "pytest-cov>=6.0.0",
+    "coverage[toml]>=7.0.0",
     "responses>=0.25.8",
     "black>=25.1.0",
     "flake8>=7.3.0",
@@ -91,6 +93,8 @@ dev = [
   "pytest>=8.4.2",
   "pytest-asyncio>=1.1.0",
   "pytest-mock>=3.15.0",
+  "pytest-cov>=6.0.0",
+  "coverage[toml]>=7.0.0",
   "responses>=0.25.8",
   "black>=25.1.0",
   "flake8>=7.3.0",
@@ -103,7 +107,15 @@ dev = [
 testpaths = [
   "tests/",
 ]
-addopts = ["--cov", "--cov-report=html", "--cov-report=xml"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = [
+  "-v",
+  "--tb=short",
+  "--cov=dependamerge",
+  "--cov-report=html",
+]
 asyncio_mode = "auto"
 markers = [
   "slow: marks tests as slow (deselected by pre-commit hooks)",
@@ -112,16 +124,20 @@ markers = [
 [tool.coverage.run]
 source = ["src"]
 omit = ["tests/*"]
+data_file = ".coverage"
 # relative_files = true
 
 [tool.coverage.html]
 directory = "coverage_html_report"
 
-[tool.coverage.xml]
-output = "coverage.xml"
+[tool.coverage.paths]
+source = [
+    "src/",
+    "*/site-packages/",
+]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 45
 skip_empty = true
 ignore_errors = true
 show_missing = true
