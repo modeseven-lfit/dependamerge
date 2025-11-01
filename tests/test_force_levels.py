@@ -91,7 +91,7 @@ class TestForceLevelNone:
             token="fake_token",
             merge_method="squash",
             force_level="none",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -106,7 +106,7 @@ class TestForceLevelNone:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="none",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             result = await manager._merge_single_pr(pr_with_blocking_review)
 
@@ -122,7 +122,7 @@ class TestForceLevelNone:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="none",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -148,7 +148,7 @@ class TestForceLevelCodeOwners:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="code-owners",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -167,7 +167,7 @@ class TestForceLevelCodeOwners:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="code-owners",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             result = await manager._merge_single_pr(pr_with_blocking_review)
 
@@ -183,7 +183,7 @@ class TestForceLevelCodeOwners:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="code-owners",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -209,7 +209,7 @@ class TestForceLevelProtectionRules:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="protection-rules",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -237,7 +237,7 @@ class TestForceLevelProtectionRules:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="protection-rules",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -255,7 +255,7 @@ class TestForceLevelProtectionRules:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="protection-rules",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             result = await manager._merge_single_pr(pr_with_blocking_review)
 
@@ -271,7 +271,7 @@ class TestForceLevelProtectionRules:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="protection-rules",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -297,7 +297,7 @@ class TestForceLevelAll:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="all",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -315,7 +315,7 @@ class TestForceLevelAll:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="all",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             # Should not return SKIPPED for blocking reviews
             result = await manager._merge_single_pr(pr_with_blocking_review)
@@ -335,7 +335,7 @@ class TestForceLevelAll:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="all",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -360,7 +360,7 @@ class TestForceLevelAll:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="all",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -383,7 +383,7 @@ class TestForceLevelAll:
             token="fake_token",
             force_level="all",
             fix_out_of_date=False,  # --no-fix
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -405,7 +405,7 @@ class TestForceValidation:
             manager = AsyncMergeManager(
                 token="fake_token",
                 force_level=level,
-                dry_run=True,
+                preview_mode=True,
             )
             assert manager.force_level == level
 
@@ -413,7 +413,7 @@ class TestForceValidation:
         """Test that default force level is 'code-owners'."""
         manager = AsyncMergeManager(
             token="fake_token",
-            dry_run=True,
+            preview_mode=True,
         )
         assert manager.force_level == "code-owners"
 
@@ -432,7 +432,7 @@ class TestForceLogging:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="code-owners",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -465,7 +465,7 @@ class TestForceLogging:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="protection-rules",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 
@@ -493,7 +493,7 @@ class TestForceLogging:
         async with AsyncMergeManager(
             token="fake_token",
             force_level="all",
-            dry_run=True,
+            preview_mode=True,
         ) as manager:
             manager._github_client = mock_github
 

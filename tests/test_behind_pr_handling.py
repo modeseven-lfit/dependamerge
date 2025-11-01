@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """
-Tests for behind PR handling and dry-run accuracy.
+Tests for behind PR handling and preview accuracy.
 
 This module tests the improved handling of PRs that are "behind" the base branch,
-including proper rebase logic and accurate dry-run simulation.
+including proper rebase logic and accurate preview simulation.
 """
 
 from unittest.mock import AsyncMock, patch
@@ -17,11 +17,11 @@ from dependamerge.models import PullRequestInfo
 
 
 class TestBehindPRHandling:
-    """Test cases for behind PR handling and dry-run accuracy."""
+    """Test cases for behind PR handling and preview accuracy."""
 
     @pytest.mark.asyncio
-    async def test_dry_run_detects_behind_pr_with_fix_enabled(self):
-        """Test that dry-run correctly identifies behind PRs when fix is enabled."""
+    async def test_preview_detects_behind_pr_with_fix_enabled(self):
+        """Test that preview correctly identifies behind PRs when fix is enabled."""
 
         pr_info = PullRequestInfo(
             number=123,
@@ -50,7 +50,7 @@ class TestBehindPRHandling:
             concurrency=1,
             fix_out_of_date=True,  # Rebase enabled
             progress_tracker=None,
-            dry_run=True,  # This is dry-run
+            preview_mode=True,  # This is preview
             dismiss_copilot=False,
         ) as merge_manager:
             # Mock the github client
@@ -71,8 +71,8 @@ class TestBehindPRHandling:
         assert result.error == "behind base branch"
 
     @pytest.mark.asyncio
-    async def test_dry_run_detects_behind_pr_with_fix_disabled(self):
-        """Test that dry-run correctly blocks behind PRs when fix is disabled."""
+    async def test_preview_detects_behind_pr_with_fix_disabled(self):
+        """Test that preview correctly blocks behind PRs when fix is disabled."""
 
         pr_info = PullRequestInfo(
             number=123,
@@ -101,7 +101,7 @@ class TestBehindPRHandling:
             concurrency=1,
             fix_out_of_date=False,  # Rebase disabled
             progress_tracker=None,
-            dry_run=True,  # This is dry-run
+            preview_mode=True,  # This is preview
             dismiss_copilot=False,
         ) as merge_manager:
             # Mock the github client
@@ -175,7 +175,7 @@ class TestBehindPRHandling:
             concurrency=1,
             fix_out_of_date=True,  # Rebase enabled
             progress_tracker=None,
-            dry_run=False,  # Actual run
+            preview_mode=False,  # Actual run
             dismiss_copilot=False,
         ) as merge_manager:
             # Mock the github client
@@ -238,7 +238,7 @@ class TestBehindPRHandling:
             concurrency=1,
             fix_out_of_date=True,
             progress_tracker=None,
-            dry_run=False,
+            preview_mode=False,
             dismiss_copilot=False,
         ) as merge_manager:
             # Mock the github client
@@ -297,7 +297,7 @@ class TestBehindPRHandling:
             concurrency=1,
             fix_out_of_date=True,
             progress_tracker=None,
-            dry_run=False,
+            preview_mode=False,
             dismiss_copilot=False,
         ) as merge_manager:
             mock_client = AsyncMock()
@@ -317,7 +317,7 @@ class TestBehindPRHandling:
             concurrency=1,
             fix_out_of_date=False,
             progress_tracker=None,
-            dry_run=False,
+            preview_mode=False,
             dismiss_copilot=False,
         ) as merge_manager:
             mock_client = AsyncMock()
@@ -380,7 +380,7 @@ class TestBehindPRHandling:
             concurrency=1,
             fix_out_of_date=True,
             progress_tracker=None,
-            dry_run=False,
+            preview_mode=False,
             dismiss_copilot=False,
         ) as merge_manager:
             mock_client = AsyncMock()
@@ -459,7 +459,7 @@ class TestBehindPRHandling:
             concurrency=1,
             fix_out_of_date=True,
             progress_tracker=None,
-            dry_run=False,
+            preview_mode=False,
             dismiss_copilot=False,
         ) as merge_manager:
             mock_client = AsyncMock()
@@ -484,8 +484,8 @@ class TestBehindPRHandling:
         assert call_count > 1
 
     @pytest.mark.asyncio
-    async def test_single_line_dry_run_output_format(self):
-        """Test that dry-run produces exactly one line of output per PR."""
+    async def test_single_line_preview_output_format(self):
+        """Test that preview produces exactly one line of output per PR."""
 
         pr_info = PullRequestInfo(
             number=123,
@@ -518,7 +518,7 @@ class TestBehindPRHandling:
             concurrency=1,
             fix_out_of_date=True,
             progress_tracker=None,
-            dry_run=True,
+            preview_mode=True,
             dismiss_copilot=False,
         ) as merge_manager:
             # Replace console with mock

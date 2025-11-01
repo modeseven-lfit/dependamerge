@@ -128,7 +128,7 @@ def _generate_continue_sha(
     pr_info: PullRequestInfo, commit_message_first_line: str
 ) -> str:
     """
-    Generate a SHA hash for continuing after dry-run evaluation.
+    Generate a SHA hash for continuing after preview evaluation.
 
     Args:
         pr_info: Source pull request information
@@ -137,7 +137,7 @@ def _generate_continue_sha(
     Returns:
         SHA256 hash string for continuation
     """
-    # Create a string combining source PR info for dry-run continuation
+    # Create a string combining source PR info for preview continuation
     combined_data = f"continue:{pr_info.repository_full_name}#{pr_info.number}:{commit_message_first_line.strip()}"
 
     # Generate SHA256 hash
@@ -510,12 +510,12 @@ def merge(
                 concurrency=10,  # Process up to 10 PRs concurrently
                 fix_out_of_date=not no_fix,  # Fix is default, --no-fix disables it
                 progress_tracker=progress_tracker,
-                dry_run=not no_confirm,
+                preview_mode=not no_confirm,
                 dismiss_copilot=dismiss_copilot,
                 force_level=force,
             ) as merge_manager:
                 if not no_confirm:
-                    pass  # No merge message in dry-run mode
+                    pass  # No merge message in preview mode
                 else:
                     console.print(
                         f"\n🚀 Merging {len(all_prs_to_merge)} pull requests..."
@@ -572,7 +572,7 @@ def merge(
                             for i, result in enumerate(merge_results):
                                 if (
                                     result.status.value == "merged"
-                                ):  # These were dry-run "merged"
+                                ):  # These were preview "merged"
                                     mergeable_prs.append(all_prs_to_merge[i])
 
                             # Define async function for real merge
@@ -584,7 +584,7 @@ def merge(
                                     concurrency=10,
                                     fix_out_of_date=not no_fix,
                                     progress_tracker=progress_tracker,
-                                    dry_run=False,  # Real merge this time
+                                    preview_mode=False,  # Execute merge
                                     dismiss_copilot=dismiss_copilot,
                                     force_level=force,
                                 ) as real_merge_manager:
@@ -625,7 +625,7 @@ def merge(
                     except EOFError:
                         console.print("\n❌ Merge cancelled.")
 
-                    return  # Exit after handling dry-run continuation
+                    return  # Exit after handling preview continuation
                 else:
                     console.print("\n💡 No PRs are mergeable at this time.")
             else:
@@ -730,7 +730,7 @@ def close(
     no_confirm: bool = typer.Option(
         False,
         "--no-confirm",
-        help="Skip confirmation prompt and close immediately without dry-run",
+        help="Skip confirmation prompt and close immediately without preview",
     ),
     similarity_threshold: float = typer.Option(
         0.8, "--threshold", help="Similarity threshold for matching PRs (0.0-1.0)"
@@ -927,19 +927,19 @@ def close(
         # Determine which PRs to close
         all_prs_to_close = [source_pr] + [pr for pr, _ in all_similar_prs]
 
-        # Perform dry-run close operation
-        async def _close_parallel(prs, dry_run_mode):
+        # Perform preview close operation
+        async def _close_parallel(prs, preview_mode):
             close_manager = AsyncCloseManager(
                 token=token,
                 progress_tracker=progress_tracker,
-                dry_run=dry_run_mode,
+                preview_mode=preview_mode,
             )
             async with close_manager:
                 # Convert to list of tuples (PR, None) for consistency
                 pr_tuples = [(pr, None) for pr in prs]
                 return await close_manager.close_prs_parallel(pr_tuples)
 
-        # Perform dry-run to check which PRs can be closed
+        # Perform preview to check which PRs can be closed
         if not no_confirm:
             if progress_tracker:
                 progress_tracker.start()
@@ -997,7 +997,7 @@ def close(
                         for i, result in enumerate(close_results):
                             if (
                                 result.status.value == "closed"
-                            ):  # These were dry-run "closed"
+                            ):  # These were preview "closed"
                                 closeable_prs.append(all_prs_to_close[i])
 
                         if progress_tracker:
