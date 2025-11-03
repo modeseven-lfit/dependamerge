@@ -62,7 +62,7 @@ class AsyncMergeManager:
         concurrency: int = 5,
         fix_out_of_date: bool = False,
         progress_tracker: MergeProgressTracker | None = None,
-        dry_run: bool = False,
+        preview_mode: bool = False,
         dismiss_copilot: bool = False,
         force_level: str = "code-owners",
     ):
@@ -72,7 +72,7 @@ class AsyncMergeManager:
         self.concurrency = concurrency
         self.fix_out_of_date = fix_out_of_date
         self.progress_tracker = progress_tracker
-        self.dry_run = dry_run
+        self.preview_mode = preview_mode
         self.dismiss_copilot = dismiss_copilot
         self.force_level = force_level
         self.log = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ class AsyncMergeManager:
         # Initialize Copilot handler if dismissal is enabled
         if self.dismiss_copilot:
             self._copilot_handler = CopilotCommentHandler(
-                self._github_client, dry_run=self.dry_run, debug=True
+                self._github_client, preview_mode=self.preview_mode, debug=True
             )
 
         return self
@@ -150,8 +150,8 @@ class AsyncMergeManager:
         if not pr_list:
             return []
 
-        if self.dry_run:
-            self.log.info(f"🔍 DRY RUN: Would merge {len(pr_list)} PRs")
+        if self.preview_mode:
+            self.log.info(f"🔍 PREVIEW: Would merge {len(pr_list)} PRs")
         else:
             self.log.info(f"Starting parallel merge of {len(pr_list)} PRs")
 
@@ -309,8 +309,8 @@ class AsyncMergeManager:
                     )
                     return result
                 else:
-                    # Only log during dry-run evaluation to avoid duplicate messages
-                    if self.dry_run:
+                    # Only log during preview evaluation to avoid duplicate messages
+                    if self.preview_mode:
                         self.log.warning(
                             f"⚠️  Overriding blocking reviews for {pr_info.repository_full_name}#{pr_info.number} (--force=all)"
                         )
@@ -369,7 +369,7 @@ class AsyncMergeManager:
                     f"Approving PR {pr_info.number} in {pr_info.repository_full_name}"
                 )
 
-            if not self.dry_run:
+            if not self.preview_mode:
                 approval_added = await self._approve_pr(
                     repo_owner, repo_name, pr_info.number
                 )
@@ -380,9 +380,9 @@ class AsyncMergeManager:
 
             # Step 5: Handle rebase if needed before merge
             if pr_info.mergeable_state == "behind" and self.fix_out_of_date:
-                if self.dry_run:
-                    # NOTE: In dry-run mode, we should NOT print here as it breaks single-line reporting
-                    # The dry-run output should only be a single line per PR in the evaluation section
+                if self.preview_mode:
+                    # NOTE: In preview mode, we should NOT print here as it breaks single-line reporting
+                    # The preview output should only be a single line per PR in the evaluation section
                     pass
                 else:
                     self.log.info(
@@ -496,11 +496,11 @@ class AsyncMergeManager:
 
             # Step 6: Attempt merge
             result.status = MergeStatus.MERGING
-            if self.dry_run:
-                # IMPORTANT: Dry-run output must be SINGLE LINE per PR for clean evaluation display
+            if self.preview_mode:
+                # IMPORTANT: Preview output must be SINGLE LINE per PR for clean evaluation display
                 # Each PR should have exactly one line of output under "🔍 Dependamerge Evaluation"
 
-                # In dry-run, simulate what would happen based on current PR state
+                # In preview mode, simulate what would happen based on current PR state
                 if pr_info.mergeable_state == "behind" and not self.fix_out_of_date:
                     result.status = MergeStatus.SKIPPED
                     result.error = "PR is behind base branch and --no-fix option is set"
@@ -531,11 +531,11 @@ class AsyncMergeManager:
                         f"🛑 Blocked: {pr_info.html_url} \\[blocked by failing checks]"
                     )
                 else:
-                    # Simulate successful merge in dry run
+                    # Simulate successful merge in preview mode
                     result.status = MergeStatus.MERGED
                     if self.progress_tracker:
                         self.progress_tracker.merge_success()
-                    # Single line summary for successful dry-run
+                    # Single line summary for successful preview
                     self._console.print(f"☑️ Approve/merge: {pr_info.html_url}")
             else:
                 if self.progress_tracker:
@@ -698,8 +698,8 @@ class AsyncMergeManager:
                             "protection-rules",
                             "all",
                         ]:
-                            # Only log during dry-run evaluation to avoid duplicate messages
-                            if self.dry_run:
+                            # Only log during preview evaluation to avoid duplicate messages
+                            if self.preview_mode:
                                 self.log.warning(
                                     f"⚠️  Bypassing code owner review requirement for {repo_owner}/{repo_name}#{pr_info.number} (--force={self.force_level})"
                                 )
@@ -717,35 +717,34 @@ class AsyncMergeManager:
             # Don't fail the merge attempt if we can't check protection rules
             pass
 
-        # Test merge capability during dry-run by attempting a test merge
-        if self.dry_run:
-            try:
-                # Use pre-determined merge method for this repository
-                cache_key = f"{repo_owner}/{repo_name}"
-                merge_method = self._pr_merge_methods.get(
-                    cache_key, self.default_merge_method
-                )
+        # Test merge capability to detect hidden branch protection rules
+        try:
+            # Use pre-determined merge method for this repository
+            cache_key = f"{repo_owner}/{repo_name}"
+            merge_method = self._pr_merge_methods.get(
+                cache_key, self.default_merge_method
+            )
 
-                # Attempt a test merge to detect hidden branch protection rules
-                test_result = await self._test_merge_capability(
-                    repo_owner, repo_name, pr_info.number, merge_method
-                )
-                if not test_result[0]:
-                    # Check if we should bypass protection rules
-                    if self.force_level in ["protection-rules", "all"]:
-                        # Only log during dry-run evaluation to avoid duplicate messages
-                        if self.dry_run:
-                            self.log.warning(
-                                f"⚠️  Bypassing branch protection check for {repo_owner}/{repo_name}#{pr_info.number}: {test_result[1]} (--force={self.force_level})"
-                            )
-                    else:
-                        return False, test_result[1]
+            # Attempt a test merge to detect hidden branch protection rules
+            test_result = await self._test_merge_capability(
+                repo_owner, repo_name, pr_info.number, merge_method
+            )
+            if not test_result[0]:
+                # Check if we should bypass protection rules
+                if self.force_level in ["code-owners", "protection-rules", "all"]:
+                    # Only log during preview evaluation to avoid duplicate messages
+                    if self.preview_mode:
+                        self.log.warning(
+                            f"⚠️  Bypassing branch protection check for {repo_owner}/{repo_name}#{pr_info.number}: {test_result[1]} (--force={self.force_level})"
+                        )
+                else:
+                    return False, test_result[1]
 
-            except Exception as e:
-                # If we can't test merge, continue with other checks
-                self.log.debug(
-                    f"Could not test merge capability for {repo_owner}/{repo_name}#{pr_info.number}: {e}"
-                )
+        except Exception as e:
+            # If we can't test merge, continue with other checks
+            self.log.debug(
+                f"Could not test merge capability for {repo_owner}/{repo_name}#{pr_info.number}: {e}"
+            )
 
         # Additional checks based on PR state
         if pr_info.mergeable_state == "blocked":
@@ -766,8 +765,8 @@ class AsyncMergeManager:
             else:
                 # If mergeable is False and state is blocked, it's blocked by failing checks
                 if self.force_level == "all":
-                    # Only log during dry-run evaluation to avoid duplicate messages
-                    if self.dry_run:
+                    # Only log during preview evaluation to avoid duplicate messages
+                    if self.preview_mode:
                         self.log.warning(
                             f"⚠️  Bypassing failing status checks for {repo_owner}/{repo_name}#{pr_info.number} (--force=all)"
                         )
@@ -1176,7 +1175,7 @@ class AsyncMergeManager:
         self, owner: str, repo: str, pr_number: int, merge_method: str
     ) -> tuple[bool, str]:
         """
-        Test if a PR can be merged by attempting a dry-run merge operation.
+        Test if a PR can be merged by validating merge requirements.
 
         This helps detect branch protection rules that aren't visible through the API,
         such as organization-level restrictions.
@@ -1229,7 +1228,7 @@ class AsyncMergeManager:
 
                 # Check for specific blocking conditions that indicate protection rules
                 if mergeable_state == "blocked" and mergeable is False:
-                    if self.force_level in ["protection-rules", "all"]:
+                    if self.force_level in ["code-owners", "protection-rules", "all"]:
                         self.log.info(
                             f"Force level '{self.force_level}' bypassing branch protection rules for {owner}/{repo}#{pr_number}"
                         )
@@ -1246,7 +1245,7 @@ class AsyncMergeManager:
                     # Otherwise it's fixable
                 elif mergeable is False and mergeable_state in ["unknown", "blocked"]:
                     # This often indicates hidden branch protection rules
-                    if self.force_level in ["protection-rules", "all"]:
+                    if self.force_level in ["code-owners", "protection-rules", "all"]:
                         self.log.info(
                             f"Force level '{self.force_level}' bypassing hidden branch protection rules for {owner}/{repo}#{pr_number}"
                         )
@@ -1292,7 +1291,7 @@ class AsyncMergeManager:
                 "protected ref" in error_msg.lower()
                 or "cannot update" in error_msg.lower()
             ):
-                if self.force_level in ["protection-rules", "all"]:
+                if self.force_level in ["code-owners", "protection-rules", "all"]:
                     self.log.info(
                         f"Force level '{self.force_level}' bypassing protected ref error for {owner}/{repo}#{pr_number}"
                     )

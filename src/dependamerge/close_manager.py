@@ -53,13 +53,13 @@ class AsyncCloseManager:
         max_retries: int = 2,
         concurrency: int = 5,
         progress_tracker: MergeProgressTracker | None = None,
-        dry_run: bool = False,
+        preview_mode: bool = False,
     ):
         self.token = token
         self.max_retries = max_retries
         self.concurrency = concurrency
         self.progress_tracker = progress_tracker
-        self.dry_run = dry_run
+        self.preview_mode = preview_mode
         self.log = logging.getLogger(__name__)
 
         # Track close operations
@@ -170,12 +170,12 @@ class AsyncCloseManager:
                 repo_owner, repo_name = repo_parts
 
                 # Perform close operation
-                if self.dry_run:
-                    # Dry-run mode: just mark as would-close
+                if self.preview_mode:
+                    # Preview mode: just mark as would-close
                     result.status = CloseStatus.CLOSED
                     self._console.print(f"☑️ Would close: {pr_info.html_url}")
                     self.log.info(
-                        f"☑️  Would close {pr_info.repository_full_name}#{pr_info.number} (dry-run)"
+                        f"☑️  Would close {pr_info.repository_full_name}#{pr_info.number} (preview)"
                     )
                 else:
                     # Actually close the PR

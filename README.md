@@ -366,7 +366,7 @@ The SHA hash derives from:
 - The first line of the commit message
 - This provides an extra layer of validation for sensitive operations
 
-### Dry Run (Interactive Preview Mode)
+### Interactive Preview Mode
 
 By default, dependamerge runs in interactive mode showing you what PRs the tool
 will merge, then prompts you to continue:
@@ -381,7 +381,7 @@ dependamerge merge https://github.com/owner/repo/pull/123
 2. Displays merge evaluation results
 3. Generates a unique SHA for security validation
 4. Prompts you to enter the SHA to proceed with actual merging
-5. Merges PRs that appear as "mergeable" in the dry-run
+5. Merges PRs that appear as "mergeable" in the preview
 
 **Example Output:**
 
@@ -447,7 +447,7 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 
 #### Close Command Options
 
-- `--no-confirm`: Skip confirmation prompt and close without dry-run
+- `--no-confirm`: Skip confirmation prompt and close without preview
 - `--threshold FLOAT`: Similarity threshold for matching PRs (0.0-1.0,
   default: 0.8)
 - `--progress/--no-progress`: Show real-time progress updates (default:
@@ -570,7 +570,7 @@ The tool intelligently handles GitHub API limitations by automatically falling
 back to thread-level resolution for COMMENTED reviews, ensuring comprehensive
 coverage without requiring user intervention.
 
-#### Interactive Dry Run with Fix Option
+#### Interactive Preview with Fix Option
 
 ```bash
 # See what changes will apply (default: fix out-of-date branches)
@@ -820,7 +820,7 @@ Solution: Add workflow/actions permissions:
 - Store GitHub tokens securely (environment variables, not in code)
 - Use tokens with minimal required permissions for your use case
 - Rotate access tokens periodically
-- Review PR changes in interactive dry-run mode first
+- Review PR changes in interactive preview mode first
 - Be cautious with low similarity thresholds
 - Consider using repository-specific tokens instead of organization-wide access
   when possible

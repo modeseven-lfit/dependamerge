@@ -32,17 +32,17 @@ COMMON_COPILOT_PATTERNS = [
 class CopilotCommentHandler:
     """Handler for managing GitHub Copilot review comments."""
 
-    def __init__(self, github_client, dry_run: bool = False, debug: bool = False):
+    def __init__(self, github_client, preview_mode: bool = False, debug: bool = False):
         """
         Initialize the Copilot comment handler.
 
         Args:
             github_client: Async GitHub client for API operations
-            dry_run: If True, only simulate dismissal operations
+            preview_mode: If True, only simulate dismissal operations
             debug: Enable debug logging
         """
         self.github_client = github_client
-        self.dry_run = dry_run
+        self.preview_mode = preview_mode
         self.debug = debug
         self.log = logging.getLogger(__name__)
 
@@ -180,14 +180,14 @@ class CopilotCommentHandler:
         Returns:
             True if successfully resolved, False otherwise
         """
-        if self.dry_run:
+        if self.preview_mode:
             if review_state == "COMMENTED":
                 self.log.info(
-                    f"🔍 DRY RUN: Would skip COMMENTED Copilot review {review_id} (cannot be dismissed)"
+                    f"🔍 PREVIEW: Would skip COMMENTED Copilot review {review_id} (cannot be dismissed)"
                 )
             else:
                 self.log.info(
-                    f"🔍 DRY RUN: Would dismiss Copilot review {review_id} (state: {review_state})"
+                    f"🔍 PREVIEW: Would dismiss Copilot review {review_id} (state: {review_state})"
                 )
             return True
 
@@ -403,10 +403,10 @@ class CopilotCommentHandler:
         Returns:
             True if successfully resolved
         """
-        if self.dry_run:
+        if self.preview_mode:
             context = f" for {pr_context}" if pr_context else ""
             self.log.info(
-                f"🔍 DRY RUN: Would resolve review thread {thread_id}{context}"
+                f"🔍 PREVIEW: Would resolve review thread {thread_id}{context}"
             )
             return True
 
@@ -572,9 +572,9 @@ class CopilotCommentHandler:
                         1  # Count as success if we resolved threads
                     )
                     thread_resolutions += resolved_threads
-                    if self.dry_run:
+                    if self.preview_mode:
                         self.log.info(
-                            f"🔍 DRY RUN: Would resolve {resolved_threads}/{total_threads} threads in review {review.id}"
+                            f"🔍 PREVIEW: Would resolve {resolved_threads}/{total_threads} threads in review {review.id}"
                         )
                     else:
                         self.log.info(
@@ -700,9 +700,9 @@ class CopilotCommentHandler:
         Returns:
             True if successfully resolved, False otherwise
         """
-        if self.dry_run:
+        if self.preview_mode:
             self.log.info(
-                f"🔍 DRY RUN: Would resolve Copilot comment thread {comment.get('id')}"
+                f"🔍 PREVIEW: Would resolve Copilot comment thread {comment.get('id')}"
             )
             return True
 
