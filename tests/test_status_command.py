@@ -13,9 +13,20 @@ class TestStatusCommand:
     def setup_method(self):
         self.runner = CliRunner()
 
-    @patch("dependamerge.cli.asyncio.run")
+    def _setup_async_mocks(self, mock_service, mock_status):
+        """Helper to setup async method mocks."""
+
+        async def mock_gather_status(org_name):
+            return mock_status
+
+        async def mock_close():
+            pass
+
+        mock_service.gather_organization_status = mock_gather_status
+        mock_service.close = mock_close
+
     @patch("dependamerge.github_service.GitHubService")
-    def test_status_command_basic(self, mock_service_class, mock_asyncio_run):
+    def test_status_command_basic(self, mock_service_class):
         """Test basic status command execution."""
         # Setup mock service
         mock_service = Mock()
@@ -64,7 +75,8 @@ class TestStatusCommand:
             errors=[],
         )
 
-        mock_asyncio_run.return_value = mock_status
+        # Mock the async methods
+        self._setup_async_mocks(mock_service, mock_status)
 
         # Run command (test with URL format)
         result = self.runner.invoke(
@@ -79,9 +91,8 @@ class TestStatusCommand:
         assert "repo1" in result.stdout
         assert "repo2" in result.stdout
 
-    @patch("dependamerge.cli.asyncio.run")
     @patch("dependamerge.github_service.GitHubService")
-    def test_status_command_json_output(self, mock_service_class, mock_asyncio_run):
+    def test_status_command_json_output(self, mock_service_class):
         """Test status command with JSON output format."""
         # Setup mock service
         mock_service = Mock()
@@ -114,7 +125,8 @@ class TestStatusCommand:
             errors=[],
         )
 
-        mock_asyncio_run.return_value = mock_status
+        # Mock the async methods
+        self._setup_async_mocks(mock_service, mock_status)
 
         # Run command with JSON format (test with plain org name)
         result = self.runner.invoke(
@@ -148,9 +160,8 @@ class TestStatusCommand:
         assert result.exit_code == 1
         assert "Invalid GitHub organization" in result.stdout
 
-    @patch("dependamerge.cli.asyncio.run")
     @patch("dependamerge.github_service.GitHubService")
-    def test_status_command_with_errors(self, mock_service_class, mock_asyncio_run):
+    def test_status_command_with_errors(self, mock_service_class):
         """Test status command when errors occur during scan."""
         # Setup mock service
         mock_service = Mock()
@@ -183,7 +194,8 @@ class TestStatusCommand:
             errors=["Error scanning repository test-org/repo2: Connection timeout"],
         )
 
-        mock_asyncio_run.return_value = mock_status
+        # Mock the async methods
+        self._setup_async_mocks(mock_service, mock_status)
 
         # Run command (test with plain org name)
         result = self.runner.invoke(
