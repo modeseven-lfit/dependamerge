@@ -1422,7 +1422,7 @@ def _display_blocked_results(scan_result, output_format: str):
     if output_format == "json":
         import json
 
-        console.print(json.dumps(scan_result.dict(), indent=2, default=str))
+        console.print(json.dumps(scan_result.model_dump(), indent=2, default=str))
         return
 
     # Table format
@@ -1499,7 +1499,7 @@ def _display_status_results(status_result, output_format: str):
     if output_format == "json":
         import json
 
-        console.print(json.dumps(status_result.dict(), indent=2, default=str))
+        console.print(json.dumps(status_result.model_dump(), indent=2, default=str))
         return
 
     # Table format
