@@ -16,7 +16,9 @@ from .models import (
     CopilotComment,
     FileChange,
     OrganizationScanResult,
+    OrganizationStatus,
     PullRequestInfo,
+    RepositoryStatus,
     ReviewInfo,
     UnmergeablePR,
     UnmergeableReason,
@@ -27,6 +29,15 @@ DEFAULT_PRS_PAGE_SIZE = 30  # Pull requests per GraphQL page
 DEFAULT_FILES_PAGE_SIZE = 50  # Files per pull request
 DEFAULT_COMMENTS_PAGE_SIZE = 10  # Comments per pull request
 DEFAULT_CONTEXTS_PAGE_SIZE = 20  # Status contexts per pull request
+
+# Automation tools recognized for PR categorization
+AUTOMATION_TOOLS = [
+    "dependabot",
+    "renovate",
+    "pre-commit",
+    "github-actions",
+    "[bot]",
+]
 
 
 class GitHubService:
@@ -935,3 +946,371 @@ class GitHubService:
                         failing.append(name)
 
         return failing
+
+    async def gather_organization_status(self, org: str) -> OrganizationStatus:
+        """
+        Gather repository status information for an organization.
+
+        This collects:
+        - Latest tags and releases
+        - Open and merged pull requests
+        - PRs affecting action files or workflows
+
+        Returns:
+            OrganizationStatus with aggregated data and errors.
+        """
+        errors: list[str] = []
+        repository_statuses: list[RepositoryStatus] = []
+        total_repositories = 0
+        scanned_repositories = 0
+
+        # Count total repositories
+        total_repositories = await self._count_org_repositories(org)
+        if self._progress:
+            self._progress.update_total_repositories(total_repositories)
+
+        # Process repositories with bounded parallelism
+        async def process_repo_status(
+            repo_node: dict[str, Any],
+        ) -> tuple[RepositoryStatus | None, int, list[str]]:
+            async with self._repo_semaphore:
+                repo_errors: list[str] = []
+                repo_full_name = repo_node.get("nameWithOwner", "unknown/unknown")
+                if self._progress:
+                    self._progress.start_repository(repo_full_name)
+                try:
+                    owner, name = self._split_owner_repo(repo_full_name)
+
+                    # Get tags and releases
+                    latest_tag, tag_date = await self._get_latest_tag(owner, name)
+                    latest_release, release_date = await self._get_latest_release(
+                        owner, name
+                    )
+
+                    # Determine status icon
+                    status_icon = self._determine_status_icon(
+                        latest_tag, latest_release, tag_date, release_date
+                    )
+
+                    # Get PR statistics
+                    pr_stats = await self._gather_pr_statistics(
+                        owner, name, tag_date or release_date
+                    )
+
+                    repo_status = RepositoryStatus(
+                        repository_name=name,
+                        latest_tag=latest_tag,
+                        latest_release=latest_release,
+                        tag_date=tag_date,
+                        release_date=release_date,
+                        status_icon=status_icon,
+                        **pr_stats,
+                    )
+
+                    if self._progress:
+                        self._progress.complete_repository(0)
+
+                    return repo_status, 1, repo_errors
+                except Exception as e:
+                    if self._progress:
+                        self._progress.add_error()
+                    return None, 0, [f"Error scanning repository {repo_full_name}: {e}"]
+
+        tasks: list[asyncio.Task] = []
+        async for repo in self._iter_org_repositories(org):
+            tasks.append(asyncio.create_task(process_repo_status(repo)))
+
+        if tasks:
+            results = await asyncio.gather(*tasks)
+            for repo_status, scanned_inc, repo_errors in results:
+                if repo_status:
+                    repository_statuses.append(repo_status)
+                scanned_repositories += scanned_inc
+                if repo_errors:
+                    errors.extend(repo_errors)
+
+        return OrganizationStatus(
+            organization=org,
+            total_repositories=total_repositories,
+            scanned_repositories=scanned_repositories,
+            repository_statuses=repository_statuses,
+            scan_timestamp=datetime.now().isoformat(),
+            errors=errors,
+        )
+
+    async def _get_latest_tag(
+        self, owner: str, name: str
+    ) -> tuple[str | None, str | None]:
+        """Get the latest tag and its date."""
+        try:
+            # Use REST API to get tags
+            tags_data = await self._api.get(
+                f"/repos/{owner}/{name}/tags", params={"per_page": 1}
+            )
+            if isinstance(tags_data, list) and len(tags_data) > 0:
+                tag_name = tags_data[0].get("name")
+                # Get commit info for the tag to get date
+                commit_sha = tags_data[0].get("commit", {}).get("sha")
+                if commit_sha:
+                    commit_data = await self._api.get(
+                        f"/repos/{owner}/{name}/commits/{commit_sha}"
+                    )
+                    if isinstance(commit_data, dict):
+                        commit_date = (
+                            commit_data.get("commit", {})
+                            .get("committer", {})
+                            .get("date")
+                        )
+                        if commit_date:
+                            # Convert ISO date to YYYY/MM/DD
+                            date_obj = datetime.fromisoformat(
+                                commit_date.replace("Z", "+00:00")
+                            )
+                            formatted_date = date_obj.strftime("%Y/%m/%d")
+                            return tag_name, formatted_date
+                return tag_name, None
+            return None, None
+        except Exception as e:
+            self.log.debug(f"Error getting latest tag for {owner}/{name}: {e}")
+            return None, None
+
+    async def _get_latest_release(
+        self, owner: str, name: str
+    ) -> tuple[str | None, str | None]:
+        """Get the latest production release (not draft/pre-release) and its date."""
+        try:
+            # Use REST API to get releases
+            releases_data = await self._api.get(f"/repos/{owner}/{name}/releases")
+            if isinstance(releases_data, list):
+                # Find first non-draft, non-prerelease
+                for release in releases_data:
+                    if not release.get("draft") and not release.get("prerelease"):
+                        release_name = release.get("tag_name") or release.get("name")
+                        published_at = release.get("published_at")
+                        if published_at:
+                            # Convert ISO date to YYYY/MM/DD
+                            date_obj = datetime.fromisoformat(
+                                published_at.replace("Z", "+00:00")
+                            )
+                            formatted_date = date_obj.strftime("%Y/%m/%d")
+                            return release_name, formatted_date
+                        return release_name, None
+            return None, None
+        except Exception as e:
+            self.log.debug(f"Error getting latest release for {owner}/{name}: {e}")
+            return None, None
+
+    def _determine_status_icon(
+        self,
+        latest_tag: str | None,
+        latest_release: str | None,
+        tag_date: str | None,
+        release_date: str | None,
+    ) -> str:
+        """
+        Determine status icon based on tag and release status.
+
+        ✅ = Tag has matching release
+        ⚠️ = Tag exists but no matching release
+        ❌ = Release is more recent than tag (or no tag but has release)
+        """
+        if latest_tag and latest_release:
+            # Check if tag and release match
+            if latest_tag == latest_release:
+                return "✅"
+            # Check if release is more recent than tag
+            if tag_date and release_date:
+                try:
+                    tag_dt = datetime.strptime(tag_date, "%Y/%m/%d")
+                    release_dt = datetime.strptime(release_date, "%Y/%m/%d")
+                    if release_dt > tag_dt:
+                        return "❌"
+                except Exception:
+                    # Date parsing failed, fall through to warning icon
+                    pass
+            return "⚠️"
+        elif latest_tag and not latest_release:
+            return "⚠️"
+        elif latest_release and not latest_tag:
+            return "❌"
+        else:
+            return "❌"
+
+    async def _gather_pr_statistics(
+        self, owner: str, name: str, since_date: str | None
+    ) -> dict[str, int]:
+        """
+        Gather PR statistics for a repository.
+
+        Returns dict with counts for:
+        - open_prs_human, open_prs_automation
+        - merged_prs_human, merged_prs_automation
+        - action_prs_human, action_prs_automation
+        - workflow_prs_human, workflow_prs_automation
+        """
+        stats = {
+            "open_prs_human": 0,
+            "open_prs_automation": 0,
+            "merged_prs_human": 0,
+            "merged_prs_automation": 0,
+            "action_prs_human": 0,
+            "action_prs_automation": 0,
+            "workflow_prs_human": 0,
+            "workflow_prs_automation": 0,
+        }
+
+        try:
+            # Get open PRs
+            first_nodes, page_info = await self._fetch_repo_prs_first_page(owner, name)
+            open_prs = list(first_nodes)
+
+            # Get additional pages if needed
+            if page_info.get("hasNextPage"):
+                async for pr_node in self._iter_repo_open_prs_pages(
+                    owner, name, page_info.get("endCursor")
+                ):
+                    open_prs.append(pr_node)
+
+            # Count open PRs
+            for pr in open_prs:
+                author = (pr.get("author") or {}).get("login", "").lower()
+                is_automation = self._is_automation_author(author)
+
+                if is_automation:
+                    stats["open_prs_automation"] += 1
+                else:
+                    stats["open_prs_human"] += 1
+
+                # Check if PR affects actions or workflows
+                files = (pr.get("files") or {}).get("nodes", []) or []
+                affects_action = self._affects_action_files(files)
+                affects_workflow = self._affects_workflow_files(files)
+
+                if affects_action:
+                    if is_automation:
+                        stats["action_prs_automation"] += 1
+                    else:
+                        stats["action_prs_human"] += 1
+
+                if affects_workflow:
+                    if is_automation:
+                        stats["workflow_prs_automation"] += 1
+                    else:
+                        stats["workflow_prs_human"] += 1
+
+            # Get merged PRs since the last tag/release
+            if since_date:
+                merged_prs = await self._get_merged_prs_since(owner, name, since_date)
+                for pr in merged_prs:
+                    author = pr.get("user", {}).get("login", "").lower()
+                    is_automation = self._is_automation_author(author)
+
+                    if is_automation:
+                        stats["merged_prs_automation"] += 1
+                    else:
+                        stats["merged_prs_human"] += 1
+
+        except Exception as e:
+            self.log.debug(f"Error gathering PR statistics for {owner}/{name}: {e}")
+
+        return stats
+
+    def _is_automation_author(self, author: str) -> bool:
+        """Check if author is an automation tool."""
+        author_lower = author.lower()
+        return any(tool in author_lower for tool in AUTOMATION_TOOLS)
+
+    def _affects_action_files(self, files: list[dict[str, Any]]) -> bool:
+        """Check if files include action definition or implementation files."""
+        action_patterns = [
+            "action.yaml",
+            "action.yml",
+            "Dockerfile",  # Action Dockerfiles
+        ]
+
+        for file_node in files:
+            path = file_node.get("path", "")
+            filename = path.split("/")[-1] if "/" in path else path
+
+            # Check for action definition files
+            if filename.lower() in [p.lower() for p in action_patterns]:
+                return True
+
+            # Check for JavaScript action files (in src/ or lib/ directories)
+            if path.startswith(("src/", "lib/")) and path.endswith(".js"):
+                return True
+
+        return False
+
+    def _affects_workflow_files(self, files: list[dict[str, Any]]) -> bool:
+        """Check if files include GitHub workflow or configuration files."""
+        for file_node in files:
+            path = file_node.get("path", "")
+
+            # Check if file is in .github directory
+            if path.startswith(".github/"):
+                # Exclude non-workflow files
+                if path.endswith((".md", ".txt", ".png", ".jpg", ".gif")):
+                    continue
+
+                # Include workflow files and other YAML configs
+                if path.startswith(".github/workflows/") or path.endswith(
+                    (".yml", ".yaml")
+                ):
+                    return True
+
+        return False
+
+    async def _get_merged_prs_since(
+        self, owner: str, name: str, since_date: str
+    ) -> list[dict[str, Any]]:
+        """Get merged PRs since a specific date."""
+        try:
+            # Convert date format from YYYY/MM/DD to ISO format
+            date_obj = datetime.strptime(since_date, "%Y/%m/%d")
+            iso_date = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # Use REST API to get merged PRs
+            merged_prs = []
+            page = 1
+            per_page = 100
+
+            while True:
+                params = {
+                    "state": "closed",
+                    "sort": "updated",
+                    "direction": "desc",
+                    "per_page": per_page,
+                    "page": page,
+                }
+
+                prs_data = await self._api.get(
+                    f"/repos/{owner}/{name}/pulls", params=params
+                )
+
+                if not isinstance(prs_data, list) or len(prs_data) == 0:
+                    break
+
+                for pr in prs_data:
+                    # Check if PR was merged
+                    merged_at = pr.get("merged_at")
+                    if merged_at:
+                        # Check if merged after the since_date
+                        if merged_at >= iso_date:
+                            merged_prs.append(pr)
+
+                # Check if we've reached the last page
+                if len(prs_data) < per_page:
+                    break
+
+                page += 1
+
+                # Limit to avoid excessive API calls
+                if page > 10:
+                    break
+
+            return merged_prs
+
+        except Exception as e:
+            self.log.debug(f"Error getting merged PRs for {owner}/{name}: {e}")
+            return []
