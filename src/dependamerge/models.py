@@ -127,3 +127,33 @@ class OrganizationScanResult(BaseModel):
     unmergeable_prs: list[UnmergeablePR]
     scan_timestamp: str
     errors: list[str] = []
+
+
+class RepositoryStatus(BaseModel):
+    """Status information for a single repository."""
+
+    repository_name: str
+    latest_tag: str | None = None
+    latest_release: str | None = None
+    tag_date: str | None = None
+    release_date: str | None = None
+    status_icon: str = "❌"  # ✅, ⚠️, or ❌
+    open_prs_human: int = 0
+    open_prs_automation: int = 0
+    merged_prs_human: int = 0
+    merged_prs_automation: int = 0
+    action_prs_human: int = 0
+    action_prs_automation: int = 0
+    workflow_prs_human: int = 0
+    workflow_prs_automation: int = 0
+
+
+class OrganizationStatus(BaseModel):
+    """Result of gathering repository status for an organization."""
+
+    organization: str
+    total_repositories: int
+    scanned_repositories: int
+    repository_statuses: list[RepositoryStatus]
+    scan_timestamp: str
+    errors: list[str] = []

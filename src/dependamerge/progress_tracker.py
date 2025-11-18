@@ -42,11 +42,12 @@ except ImportError:
 class ProgressTracker:
     """Real-time progress tracker for organization blocked PR checking operations."""
 
-    def __init__(self, organization: str):
+    def __init__(self, organization: str, show_pr_stats: bool = True):
         """Initialize progress tracker for an organization blocked PR check.
 
         Args:
             organization: Name of the GitHub organization being checked
+            show_pr_stats: Whether to show PR analysis statistics (default True)
         """
         self.organization = organization
         self.start_time = datetime.now()
@@ -60,6 +61,9 @@ class ProgressTracker:
         self.unmergeable_prs_found = 0
         self.current_operation = "Initializing..."
         self.errors_count = 0
+
+        # Configuration
+        self.show_pr_stats = show_pr_stats
 
         # Rate limiting tracking
         self.rate_limited = False
@@ -222,8 +226,8 @@ class ProgressTracker:
             text.append(f"{self.organization}", style="bold cyan")
             text.append(" (counting repositories...)", style="white")
 
-        # Stats (only when repo count is known)
-        if self.total_repositories > 0:
+        # Stats (only when repo count is known and PR stats are enabled)
+        if self.total_repositories > 0 and self.show_pr_stats:
             text.append(f"{self.total_prs_analyzed} PRs analyzed | ", style="white")
 
             if self.unmergeable_prs_found > 0:
@@ -233,6 +237,10 @@ class ProgressTracker:
 
             if self.errors_count > 0:
                 text.append(f" | {self.errors_count} errors", style="yellow")
+        elif self.total_repositories > 0 and not self.show_pr_stats:
+            # Show errors even when PR stats are disabled
+            if self.errors_count > 0:
+                text.append(f"{self.errors_count} errors", style="yellow")
 
         text.append("\n")
 
@@ -259,7 +267,10 @@ class ProgressTracker:
         # Generate simple text display
         if self.total_repositories > 0:
             progress_pct = (self.completed_repositories / self.total_repositories) * 100
-            progress_line = f"🔍 Checking {self.organization} ({self.completed_repositories}/{self.total_repositories} repos, {progress_pct:.0f}%) | {self.total_prs_analyzed} PRs analyzed | {self.unmergeable_prs_found} unmergeable"
+            if self.show_pr_stats:
+                progress_line = f"🔍 Checking {self.organization} ({self.completed_repositories}/{self.total_repositories} repos, {progress_pct:.0f}%) | {self.total_prs_analyzed} PRs analyzed | {self.unmergeable_prs_found} unmergeable"
+            else:
+                progress_line = f"🔍 Checking {self.organization} ({self.completed_repositories}/{self.total_repositories} repos, {progress_pct:.0f}%)"
             if self.errors_count > 0:
                 progress_line += f" | {self.errors_count} errors"
         else:

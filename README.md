@@ -14,6 +14,7 @@ Command-line tool for the management of pull requests in a GitHub organization.
 | merge   | Bulk approve/merge pull requests across a GitHub organization  |
 | close   | Bulk close pull requests across a GitHub organization          |
 | blocked | Reports blocked pull requests in a GitHub organization         |
+| status  | Reports repository statistics for tags, releases, and PRs      |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -35,6 +36,18 @@ Matches pull requests based on a heuristic that considers the criteria:
 - Pull requests with the same title/body content
 - Pull requests containing the same package updates
 - Pull requests changing the same files
+
+## Status
+
+Reports repository statistics across a GitHub organization, including:
+
+- Latest tags and releases with synchronization status
+- Open and merged pull request counts
+- Pull requests affecting action files or workflow configurations
+- Separate counts for human contributors and automation tools
+
+Helps track release management and identify repositories needing
+attention. Supports both table and JSON output formats.
 
 ## Blocked
 
@@ -319,6 +332,37 @@ The close command will:
 mergeable state or branch protection rules. It requires PRs to be in the open
 state.
 
+### Repository Status
+
+Report statistics for tags, releases, and pull requests:
+
+```bash
+# Basic organization status check
+dependamerge status myorganization
+
+# Using full GitHub URL
+dependamerge status https://github.com/myorganization/
+
+# Check with JSON output
+dependamerge status myorganization --format json
+
+# Disable real-time progress display
+dependamerge status myorganization --no-progress
+```
+
+The status command will:
+
+- Scan all repositories in the organization
+- Report latest tags and releases with sync status indicators
+- Count open and merged PRs (split by human/automation)
+- Identify PRs affecting action files or workflow configurations
+
+Status icons:
+
+- ✅ Tag has matching release
+- ⚠️ Tag exists but no matching release
+- ❌ Release is more recent than tag
+
 ### Finding Blocked PRs
 
 Find blocked pull requests in an entire GitHub organization:
@@ -326,6 +370,9 @@ Find blocked pull requests in an entire GitHub organization:
 ```bash
 # Basic organization check for blocked PRs
 dependamerge blocked myorganization
+
+# Using full GitHub URL
+dependamerge blocked https://github.com/myorganization/
 
 # Check with JSON output
 dependamerge blocked myorganization --format json
@@ -417,10 +464,16 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 
 ### Command Options
 
+#### Status Command Options
+
+- `--format TEXT`: Output format - table or json (default: table)
+- `--progress/--no-progress`: Show real-time progress updates (default:
+  progress)
+- `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
+
 #### Blocked Command Options
 
 - `--format TEXT`: Output format - table or json (default: table)
-
 - `--progress/--no-progress`: Show real-time progress updates (default:
   progress)
 - `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
