@@ -136,14 +136,43 @@ jobs:
             sbom-cyclonedx.xml
           retention-days: 45
 
-      - name: "Security scan with Grype"
+      - name: "Security scan with Grype (SARIF)"
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@3aaf50d765cfcceafa51d322ccb790e40f6cd8c5  # v7.2.0
+        id: grype-sarif
         with:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
+          output-format: "sarif"
+          output-file: "grype-results.sarif"
+          fail-build: "true"
 
-      - name: "Summary step"
+      - name: "Security scan with Grype (Text/Table)"
+        # yamllint disable-line rule:line-length
+        uses: anchore/scan-action@3aaf50d765cfcceafa51d322ccb790e40f6cd8c5  # v7.2.0
+        id: grype-table
+        if: always()
+        with:
+          sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
+          output-format: "table"
+          output-file: "grype-results.txt"
+          fail-build: "false"
+
+      - name: "Upload Grype scan results"
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5.0.0
+        if: always()
+        with:
+          name: grype-scan-results
+          path: |
+            grype-results.sarif
+            grype-results.txt
+          retention-days: 90
+
+      - name: "Grype summary"
+        if: always()
         run: |
-            # Summary step
-            echo "SBOM count: ${{ steps.sbom.outputs.component_count }}"
-            echo "Tool used: ${{ steps.sbom.outputs.dependency_manager }}"
+            # Grype summary
+            echo "## Grype Summary" >> "$GITHUB_STEP_SUMMARY"
+            [ -f grype-results.txt ] && cat grype-results.txt \
+              >> "$GITHUB_STEP_SUMMARY" || echo "No scan results available" \
+              >> "$GITHUB_STEP_SUMMARY"
