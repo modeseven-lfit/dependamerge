@@ -8,6 +8,12 @@ name: 'Python Build/Test'
 # yamllint disable-line rule:truthy
 on:
   workflow_dispatch:
+    inputs:
+      clear_cache:
+        description: 'Clear all Python dependency caches'
+        type: boolean
+        default: false
+        required: false
   pull_request:
     types: [opened, reopened, edited, synchronize]
     branches:
@@ -23,7 +29,8 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
-permissions: {}
+permissions:
+  actions: write  # Required for cache deletion when clear_cache is true
 
 jobs:
   python-build:
@@ -35,6 +42,7 @@ jobs:
       artefact_path: "${{ steps.python-build.outputs.artefact_path }}"
     permissions:
       contents: read
+      actions: write  # Required for cache deletion when clear_cache is true
     timeout-minutes: 12
     env:
       GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
@@ -52,6 +60,8 @@ jobs:
         id: python-build
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/python-build-action@03a07d633766b8b26eeb12ef8b43cea43114dd69 # v0.1.21
+        with:
+          clear_cache: ${{ github.event.inputs.clear_cache || 'false' }}
 
   python-tests:
     name: 'Python Tests'
