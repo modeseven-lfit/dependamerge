@@ -24,6 +24,7 @@ jobs:
     outputs:
       tag: "${{ steps.tag-validate.outputs.tag }}"
       should_promote: "${{ steps.check-release.outputs.should_promote }}"
+      release_id: "${{ steps.check-release.outputs.release_id }}"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -57,9 +58,11 @@ jobs:
           TAG="${{ steps.tag-validate.outputs.tag }}"
 
           # Check if release exists and get its draft status
-          if RELEASE_INFO=$(gh release view "$TAG" --json isDraft \
+          if RELEASE_INFO=$(gh release view "$TAG" --json isDraft,id \
               2>/dev/null); then
             IS_DRAFT=$(echo "$RELEASE_INFO" | jq -r '.isDraft')
+            RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
+            echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
             if [ "$IS_DRAFT" = "false" ]; then
               echo "should_promote=false" >> "$GITHUB_OUTPUT"
               echo "Published release already exists for tag $TAG, " \
@@ -71,6 +74,7 @@ jobs:
             fi
           else
             echo "should_promote=true" >> "$GITHUB_OUTPUT"
+            echo "release_id=" >> "$GITHUB_OUTPUT"
             echo "No release found for tag $TAG, will proceed with promotion"
           fi
 
@@ -300,12 +304,15 @@ jobs:
     name: 'Attach Artefacts to Release'
     runs-on: 'ubuntu-latest'
     needs:
+      - 'tag-validate'
       - 'python-build'
       - 'pypi'
     # yamllint disable-line rule:line-length
     permissions:
       contents: write # IMPORTANT: needed to edit release, attach artefacts
     timeout-minutes: 5
+    env:
+      GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -313,7 +320,25 @@ jobs:
         with:
           egress-policy: 'audit'
 
-      # Note: no need for a checkout step in this job
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+
+      - name: 'Ensure draft release exists'
+        id: 'ensure-release'
+        shell: bash
+        run: |
+          TAG="${{ needs.tag-validate.outputs.tag }}"
+
+          # Check if release exists
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release for tag $TAG already exists"
+          else
+            echo "Creating draft release for tag $TAG"
+            gh release create "$TAG" \
+              --draft \
+              --title "Release $TAG" \
+              --notes "Automated release for $TAG"
+          fi
 
       - name: '⬇ Download build artefacts'
         # yamllint disable-line rule:line-length
