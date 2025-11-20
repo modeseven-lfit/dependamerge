@@ -136,10 +136,17 @@ class GitHubService:
     # Public high-level APIs
     # -----------------------
 
-    async def scan_organization(self, org: str) -> OrganizationScanResult:
+    async def scan_organization(
+        self, org: str, include_drafts: bool = False
+    ) -> OrganizationScanResult:
         """
         Scan an organization for unmergeable PRs using GraphQL in a batched,
         parallel fashion with bounded concurrency.
+
+        Args:
+            org: The organization name to scan.
+            include_drafts: If True, include draft PRs in the results. If False (default),
+                          filter out PRs that are only blocked due to draft status.
 
         Returns:
             OrganizationScanResult with aggregated data and errors.
@@ -184,7 +191,7 @@ class GitHubService:
 
                     # Analyze PRs concurrently within this repository
                     tasks = [
-                        self._analyze_pr_node(repo_full_name, pr_node)
+                        self._analyze_pr_node(repo_full_name, pr_node, include_drafts)
                         for pr_node in prs_nodes
                     ]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -376,11 +383,20 @@ class GitHubService:
     # -------------------------------
 
     async def _analyze_pr_node(
-        self, repo_full_name: str, pr: dict[str, Any]
+        self, repo_full_name: str, pr: dict[str, Any], include_drafts: bool = False
     ) -> UnmergeablePR | None:
         """
         Analyze a PR GraphQL node and produce UnmergeablePR if any blocking reasons
         are detected. Returns None if mergeable or if insufficient data.
+
+        Args:
+            repo_full_name: The full name of the repository (owner/repo).
+            pr: The PR GraphQL node data.
+            include_drafts: If True, include draft PRs in the results. If False (default),
+                          return None for PRs that are only blocked due to draft status.
+
+        This applies code-owners level bypass logic by default (matching merge command behavior).
+        PRs that can be merged with standard permissions are not reported as blocked.
         """
         if self._progress:
             try:
@@ -438,6 +454,17 @@ class GitHubService:
 
         if not reasons:
             return None
+
+        # Filter out PRs that are only blocked due to draft status if include_drafts is False
+        if not include_drafts:
+            # Check if draft is the only blocking reason
+            if len(reasons) == 1 and reasons[0].type == "draft":
+                return None
+            # Remove draft reason from the list if there are other blocking reasons
+            reasons = [r for r in reasons if r.type != "draft"]
+            # If after filtering there are no reasons left, return None
+            if not reasons:
+                return None
 
         copilot_comments = self._extract_copilot_comments(pr)
         # File change extraction not required for UnmergeablePR summary here

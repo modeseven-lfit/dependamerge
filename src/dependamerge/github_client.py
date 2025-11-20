@@ -351,16 +351,28 @@ class GitHubClient:
             return False
 
     def scan_organization_for_unmergeable_prs(
-        self, org_name: str, progress_tracker: Optional["ProgressTracker"] = None
+        self,
+        org_name: str,
+        progress_tracker: Optional["ProgressTracker"] = None,
+        include_drafts: bool = False,
     ) -> OrganizationScanResult:
-        """Scan an entire GitHub organization for unmergeable pull requests using the async service."""
+        """Scan an entire GitHub organization for unmergeable pull requests using the async service.
+
+        Args:
+            org_name: The organization name to scan.
+            progress_tracker: Optional progress tracker for UI updates.
+            include_drafts: If True, include draft PRs in results. If False (default),
+                          filter out PRs that are only blocked due to draft status.
+        """
         scan_timestamp = datetime.now().isoformat()
         from .github_service import GitHubService
 
         async def _run():
             svc = GitHubService(token=self.token, progress_tracker=progress_tracker)
             try:
-                return await svc.scan_organization(org_name)
+                return await svc.scan_organization(
+                    org_name, include_drafts=include_drafts
+                )
             finally:
                 await svc.close()
 

@@ -1196,6 +1196,11 @@ def blocked(
     output_format: str = typer.Option(
         "table", "--format", help="Output format: table, json"
     ),
+    include_drafts: bool = typer.Option(
+        False,
+        "--include-drafts",
+        help="Include draft pull requests in the blocked PRs report",
+    ),
     fix: bool = typer.Option(
         False,
         "--fix",
@@ -1282,7 +1287,9 @@ def blocked(
         async def _run_blocked_check():
             svc = GitHubService(token=token, progress_tracker=progress_tracker)
             try:
-                return await svc.scan_organization(organization)
+                return await svc.scan_organization(
+                    organization, include_drafts=include_drafts
+                )
             finally:
                 await svc.close()
 

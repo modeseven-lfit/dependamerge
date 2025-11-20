@@ -455,7 +455,9 @@ class TestGitHubClientAsyncIntegration:
         assert result.total_prs == 10
 
         # Verify async methods were called properly
-        mock_service.scan_organization.assert_called_once_with("test-org")
+        mock_service.scan_organization.assert_called_once_with(
+            "test-org", include_drafts=False
+        )
         mock_service.close.assert_called_once()
 
 
