@@ -294,6 +294,42 @@ jobs:
           tag: "${{ needs.tag-validate.outputs.tag }}"
           pypi_credential: "${{ secrets.PYPI_CREDENTIAL }}"
 
+  # Attach build artefacts prior to release promotion
+  # This enables the GitHub immutable releases feature
+  attach-artefacts:
+    name: 'Attach Artefacts to Release'
+    runs-on: 'ubuntu-latest'
+    needs:
+      - 'python-build'
+      - 'pypi'
+    # yamllint disable-line rule:line-length
+    permissions:
+      contents: write # IMPORTANT: needed to edit release, attach artefacts
+    timeout-minutes: 5
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2  # v2.13.2
+        with:
+          egress-policy: 'audit'
+
+      # Note: no need for a checkout step in this job
+
+      - name: '⬇ Download build artefacts'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: "${{ needs.python-build.outputs.artefact_name }}"
+          path: "${{ needs.python-build.outputs.artefact_path }}"
+
+      - name: 'Attach build artefacts to release'
+        # yamllint disable-line rule:line-length
+        uses: alexellis/upload-assets@13926a61cdb2cb35f5fdef1c06b8b591523236d3  # 0.4.1
+        env:
+          GITHUB_TOKEN: "${{ github.token }}"
+        with:
+          asset_paths: '["${{ needs.python-build.outputs.artefact_path }}/**"]'
+
 
   promote-release:
     name: 'Promote Draft Release'
@@ -301,7 +337,7 @@ jobs:
     if: needs.tag-validate.outputs.should_promote == 'true'
     needs:
       - 'tag-validate'
-      - 'pypi'
+      - 'attach-artefacts'
     runs-on: 'ubuntu-latest'
     permissions:
       contents: write # IMPORTANT: needed to edit a draft release and promote it
@@ -354,42 +390,3 @@ jobs:
           TAG="${{ needs.tag-validate.outputs.tag }}"
           RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
           echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
-
-  # Need to attach build artefacts to the release
-  # This step could potentially be moved
-  # (May be better to when/where the release is still in draft state)
-  attach-artefacts:
-    name: 'Attach Artefacts to Release'
-    runs-on: 'ubuntu-latest'
-    needs:
-      - 'tag-validate'
-      - 'python-build'
-      - 'promote-release'
-    # yamllint disable-line rule:line-length
-    if: always() && (needs.promote-release.result == 'success' || needs.promote-release.result == 'skipped')
-    permissions:
-      contents: write # IMPORTANT: needed to edit release, attach artefacts
-    timeout-minutes: 5
-    steps:
-      # Harden the runner used by this workflow
-      # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2  # v2.13.2
-        with:
-          egress-policy: 'audit'
-
-      # Note: no need for a checkout step in this job
-
-      - name: '⬇ Download build artefacts'
-        # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
-        with:
-          name: "${{ needs.python-build.outputs.artefact_name }}"
-          path: "${{ needs.python-build.outputs.artefact_path }}"
-
-      - name: 'Attach build artefacts to release'
-        # yamllint disable-line rule:line-length
-        uses: alexellis/upload-assets@13926a61cdb2cb35f5fdef1c06b8b591523236d3  # 0.4.1
-        env:
-          GITHUB_TOKEN: "${{ github.token }}"
-        with:
-          asset_paths: '["${{ needs.python-build.outputs.artefact_path }}/**"]'
