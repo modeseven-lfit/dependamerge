@@ -183,7 +183,9 @@ class TestAsyncIntegration:
         mock_service_class.assert_called_once_with(
             token="test_token", progress_tracker=None
         )
-        mock_service.scan_organization.assert_called_once_with("test-org")
+        mock_service.scan_organization.assert_called_once_with(
+            "test-org", include_drafts=False
+        )
         mock_service.close.assert_called_once()
 
     @patch("dependamerge.github_async.GitHubAsync")
