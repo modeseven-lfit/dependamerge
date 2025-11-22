@@ -33,6 +33,33 @@ permissions:
   actions: write  # Required for cache deletion when clear_cache is true
 
 jobs:
+  repository-metadata:
+    name: "Repository Metadata"
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+
+      - name: "Gather repository metadata"
+        id: repo-metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/repository-metadata-action@5fd432a3a4593f838a8a51e39be81c9afb250e0b # v0.1.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          generate_summary: 'false'
+          artifact_upload: 'true'
+          artifact_formats: 'json'
+
   python-build:
     name: 'Python Build'
     runs-on: 'ubuntu-latest'
