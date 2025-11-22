@@ -47,7 +47,7 @@ jobs:
     name: 'Validate Tag Push'
     runs-on: 'ubuntu-latest'
     permissions:
-      contents: read
+      contents: write  # Needed to draft a release
     timeout-minutes: 1
     outputs:
       tag: "${{ steps.tag-validate.outputs.tag_name }}"
