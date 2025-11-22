@@ -15,6 +15,33 @@ on:
 permissions: {}
 
 jobs:
+  repository-metadata:
+    name: "Repository Metadata"
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+
+      - name: "Gather repository metadata"
+        id: repo-metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/repository-metadata-action@5fd432a3a4593f838a8a51e39be81c9afb250e0b # v0.1.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          generate_summary: 'false'
+          artifact_upload: 'true'
+          artifact_formats: 'json'
+
   tag-validate:
     name: 'Validate Tag Push'
     runs-on: 'ubuntu-latest'
@@ -22,7 +49,7 @@ jobs:
       contents: read
     timeout-minutes: 1
     outputs:
-      tag: "${{ steps.tag-validate.outputs.tag }}"
+      tag: "${{ steps.tag-validate.outputs.tag_name }}"
       should_promote: "${{ steps.check-release.outputs.should_promote }}"
       release_id: "${{ steps.check-release.outputs.release_id }}"
     steps:
@@ -32,15 +59,23 @@ jobs:
         with:
           egress-policy: 'audit'
 
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          fetch-depth: 0
+
       - name: 'Verify Pushed Tag'
         id: 'tag-validate'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/tag-push-verify-action@80e2bdbbb9ee7b67557a31705892b75e75d2859e  # v0.1.1
+        uses: lfreleng-actions/tag-validate-action@fdc054551b7cb082e4f283934c0878d5f15478f1  # v0.1.0
         with:
-          versioning: 'semver'
+          require_type: 'semver'
+          require_signed: 'true'
+          token: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: 'Reject Development Tags'
-        if: steps.tag-validate.outputs.dev_version == 'true'
+        if: steps.tag-validate.outputs.development_tag == 'true'
         shell: bash
         run: |
           # Reject Development Tags
@@ -323,23 +358,6 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
 
-      - name: 'Ensure draft release exists'
-        id: 'ensure-release'
-        shell: bash
-        run: |
-          TAG="${{ needs.tag-validate.outputs.tag }}"
-
-          # Check if release exists
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release for tag $TAG already exists"
-          else
-            echo "Creating draft release for tag $TAG"
-            gh release create "$TAG" \
-              --draft \
-              --title "Release $TAG" \
-              --notes "Automated release for $TAG"
-          fi
-
       - name: '⬇ Download build artefacts'
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
@@ -349,11 +367,10 @@ jobs:
 
       - name: 'Attach build artefacts to release'
         # yamllint disable-line rule:line-length
-        uses: alexellis/upload-assets@13926a61cdb2cb35f5fdef1c06b8b591523236d3  # 0.4.1
-        env:
-          GITHUB_TOKEN: "${{ github.token }}"
+        uses: modeseven-lfreleng-actions/release-assets-action@initial-update  # Testing
         with:
           asset_paths: '["${{ needs.python-build.outputs.artefact_path }}/**"]'
+          release_tag: "${{ needs.tag-validate.outputs.tag }}"
 
 
   promote-release:
