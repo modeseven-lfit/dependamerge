@@ -17,25 +17,26 @@ permissions: {}
 jobs:
   repository-metadata:
     name: "Repository Metadata"
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
     timeout-minutes: 5
     steps:
       # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2  # v2.13.2
         with:
           egress-policy: audit
 
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           fetch-depth: 0
 
       - name: "Gather repository metadata"
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@5fd432a3a4593f838a8a51e39be81c9afb250e0b # v0.1.2
+        uses: lfreleng-actions/repository-metadata-action@5fd432a3a4593f838a8a51e39be81c9afb250e0b  # v0.1.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           generate_summary: 'false'
@@ -50,8 +51,6 @@ jobs:
     timeout-minutes: 1
     outputs:
       tag: "${{ steps.tag-validate.outputs.tag_name }}"
-      should_promote: "${{ steps.check-release.outputs.should_promote }}"
-      release_id: "${{ steps.check-release.outputs.release_id }}"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -64,9 +63,8 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           fetch-depth: 0
-          fetch-tags: true
 
-      - name: 'Verify Pushed Tag'
+      - name: 'Verify pushed tag'
         id: 'tag-validate'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/tag-validate-action@fix-ssh-signature-detection  # Testing
@@ -75,43 +73,39 @@ jobs:
           require_signed: 'true'
           token: "${{ secrets.GITHUB_TOKEN }}"
 
-      - name: 'Reject Development Tags'
+      - name: 'Reject development tags'
         if: steps.tag-validate.outputs.development_tag == 'true'
         shell: bash
         run: |
-          # Reject Development Tags
+          # Reject development tags
           echo "Development tag pushed; aborting release workflow 🛑"
           echo "Development tag pushed; aborting release workflow 🛑" \
             >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
-      - name: 'Check if release exists'
-        id: 'check-release'
+      - name: 'Ensure draft release exists'
+        id: 'ensure-release'
         shell: bash
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
         run: |
-          TAG="${{ steps.tag-validate.outputs.tag }}"
-
+          # Ensure draft release exists
+          TAG="${{ steps.tag-validate.outputs.tag_name }}"
           # Check if release exists and get its draft status
-          if RELEASE_INFO=$(gh release view "$TAG" --json isDraft,id \
-              2>/dev/null); then
+          if RELEASE_INFO=$(gh release view "$TAG" \
+            --json isDraft 2>/dev/null); then
             IS_DRAFT=$(echo "$RELEASE_INFO" | jq -r '.isDraft')
-            RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
-            echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
-            if [ "$IS_DRAFT" = "false" ]; then
-              echo "should_promote=false" >> "$GITHUB_OUTPUT"
-              echo "Published release already exists for tag $TAG, " \
-                   "skipping promotion"
+            if [ "$IS_DRAFT" = "true" ]; then
+              echo "Draft release for tag $TAG already exists"
             else
-              echo "should_promote=true" >> "$GITHUB_OUTPUT"
-              echo "Draft release exists for tag $TAG, " \
-                   "will proceed with promotion"
+              echo "Published release for tag $TAG already exists"
             fi
           else
-            echo "should_promote=true" >> "$GITHUB_OUTPUT"
-            echo "release_id=" >> "$GITHUB_OUTPUT"
-            echo "No release found for tag $TAG, will proceed with promotion"
+            echo "Creating draft release for tag $TAG"
+            gh release create "$TAG" \
+              --draft \
+              --title "Release $TAG" \
+              --notes "Automated release for $TAG"
           fi
 
   python-build:
@@ -283,7 +277,7 @@ jobs:
       name: 'development'
     permissions:
       contents: read
-      id-token: write # IMPORTANT: mandatory for trusted publishing
+      id-token: write  # IMPORTANT: mandatory for trusted publishing
     timeout-minutes: 5
     steps:
       # Harden the runner used by this workflow
@@ -313,7 +307,7 @@ jobs:
       name: 'production'
     permissions:
       contents: read
-      id-token: write # IMPORTANT: mandatory for trusted publishing
+      id-token: write  # IMPORTANT: mandatory for trusted publishing
     timeout-minutes: 5
     steps:
       # Harden the runner used by this workflow
@@ -345,7 +339,7 @@ jobs:
       - 'pypi'
     # yamllint disable-line rule:line-length
     permissions:
-      contents: write # IMPORTANT: needed to edit release, attach artefacts
+      contents: write  # IMPORTANT: needed to edit release, attach artefacts
     timeout-minutes: 5
     env:
       GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
@@ -377,13 +371,12 @@ jobs:
   promote-release:
     name: 'Promote Draft Release'
     # yamllint disable-line rule:line-length
-    if: needs.tag-validate.outputs.should_promote == 'true'
     needs:
       - 'tag-validate'
       - 'attach-artefacts'
     runs-on: 'ubuntu-latest'
     permissions:
-      contents: write # IMPORTANT: needed to edit a draft release and promote it
+      contents: write  # IMPORTANT: needed for draft release promotion
     timeout-minutes: 2
     outputs:
       release_url: "${{ steps.promote-release.outputs.release_url }}"
