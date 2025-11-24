@@ -605,6 +605,62 @@ class GitHubAsync:
                 return {}
             raise
 
+    async def check_user_can_bypass_protection(
+        self, owner: str, repo: str
+    ) -> tuple[bool, str]:
+        """
+        Check if the authenticated user has permissions to bypass branch protection.
+
+        Returns:
+            Tuple of (can_bypass: bool, reason: str)
+        """
+        try:
+            # Get repository info including permissions
+            repo_data = await self.get(f"/repos/{owner}/{repo}")
+            if not isinstance(repo_data, dict):
+                return False, "Could not fetch repository information"
+
+            permissions = repo_data.get("permissions", {})
+
+            # Check if user has admin permissions (which includes bypass)
+            if permissions.get("admin"):
+                return True, "User has admin permissions"
+
+            # Try to get more detailed permission info from user's repository membership
+            try:
+                # For organization repos, check if user has bypass permissions
+                # This requires checking the user's role/permissions
+                user_data = await self.get("/user")
+                if isinstance(user_data, dict):
+                    username = user_data.get("login")
+                    if username:
+                        # Check collaborator permissions
+                        collab_data = await self.get(
+                            f"/repos/{owner}/{repo}/collaborators/{username}/permission"
+                        )
+                        if isinstance(collab_data, dict):
+                            permission_level = collab_data.get("permission")
+                            # admin permission can bypass
+                            if permission_level == "admin":
+                                return True, "User has admin collaborator permissions"
+            except Exception:
+                # If we can't check detailed permissions, continue with basic check
+                pass
+
+            # If we have push permissions but not admin, we likely can't bypass
+            if permissions.get("push"):
+                return (
+                    False,
+                    "User has push permissions but not admin/bypass permissions",
+                )
+
+            return False, "User does not have bypass permissions"
+
+        except Exception as e:
+            # If we can't determine permissions, return conservative result
+            self.log.debug(f"Could not check bypass permissions: {e}")
+            return False, f"Could not verify permissions: {str(e)}"
+
     async def update_branch(self, owner: str, repo: str, number: int) -> None:
         """
         Update a pull request branch.

@@ -732,11 +732,30 @@ class AsyncMergeManager:
             if not test_result[0]:
                 # Check if we should bypass protection rules
                 if self.force_level in ["code-owners", "protection-rules", "all"]:
+                    # Check if user has permissions to bypass before attempting
+                    if self._github_client:
+                        (
+                            can_bypass,
+                            bypass_reason,
+                        ) = await self._github_client.check_user_can_bypass_protection(
+                            repo_owner, repo_name
+                        )
+                        if not can_bypass:
+                            return (
+                                False,
+                                f"cannot bypass branch protection: {bypass_reason}",
+                            )
+
                     # Only log during preview evaluation to avoid duplicate messages
                     if self.preview_mode:
                         self.log.warning(
                             f"⚠️  Bypassing branch protection check for {repo_owner}/{repo_name}#{pr_info.number}: {test_result[1]} (--force={self.force_level})"
                         )
+                    # When bypassing, return early to allow merge to proceed
+                    return (
+                        True,
+                        f"branch protection check bypassed (--force={self.force_level})",
+                    )
                 else:
                     return False, test_result[1]
 
@@ -840,7 +859,7 @@ class AsyncMergeManager:
                                 and review.get("state") == "APPROVED"
                             ):
                                 self._log_and_print(
-                                    f"⏩ Skipping approval on {owner}/{repo}#{pr_number} - already approved by {current_user}",
+                                    f"⏩ Already approved: {owner}/{repo}#{pr_number} [{current_user}]",
                                     "blue",
                                 )
                                 return False
@@ -857,8 +876,14 @@ class AsyncMergeManager:
                             approved_reviews
                             and pr_data.get("mergeable_state") == "clean"
                         ):
+                            # Get list of approvers
+                            approvers = [
+                                review.get("user", {}).get("login", "unknown")
+                                for review in approved_reviews
+                            ]
+                            approvers_str = ", ".join(approvers)
                             self._log_and_print(
-                                f"⏩ Skipping approval on {owner}/{repo}#{pr_number} - already has {len(approved_reviews)} approval(s)",
+                                f"⏩ Already approved: {owner}/{repo}#{pr_number} [{approvers_str}]",
                                 "blue",
                             )
                             return False
@@ -873,7 +898,7 @@ class AsyncMergeManager:
             if "422" in error_str and "Unprocessable Entity" in error_str:
                 # This usually means the PR can't be approved (e.g., already approved by user, or other restrictions)
                 self._log_and_print(
-                    f"⏩ Skipping approval on {owner}/{repo}#{pr_number} - cannot approve (already approved or restricted)",
+                    f"⏩ Already approved: {owner}/{repo}#{pr_number} [cannot approve - already approved or restricted]",
                     "blue",
                 )
                 return False
