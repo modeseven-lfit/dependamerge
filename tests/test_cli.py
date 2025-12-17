@@ -300,7 +300,7 @@ class TestCLI:
             # Check for merge message (may include Rich color codes)
             assert "22" in result.stdout
             # Check for merge success message (may include Rich color codes)
-            assert "✅ Success:" in result.stdout
+            assert "✅ Merged:" in result.stdout
             assert "1" in result.stdout and "PRs" in result.stdout
 
             # Test passes if we reach this point - the merge was successful

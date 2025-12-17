@@ -28,6 +28,7 @@ __all__ = [
     "RateLimitError",
     "SecondaryRateLimitError",
     "GraphQLError",
+    "PermissionError",
 ]
 
 GITHUB_API = "https://api.github.com"
@@ -44,6 +45,26 @@ class SecondaryRateLimitError(Exception):
 
 class GraphQLError(Exception):
     """Raised for GraphQL errors returned by GitHub."""
+
+
+class PermissionError(Exception):
+    """Raised when GitHub API returns a permission/authorization error.
+
+    Attributes:
+        operation: The operation that failed (e.g., 'approve', 'merge', 'close')
+        message: Human-readable error message
+        token_type_guidance: Guidance for both classic and fine-grained tokens
+    """
+
+    def __init__(
+        self,
+        operation: str,
+        message: str,
+        token_type_guidance: dict[str, str] | None = None,
+    ):
+        self.operation = operation
+        self.token_type_guidance = token_type_guidance or {}
+        super().__init__(message)
 
 
 class RetryableError(Exception):
@@ -89,6 +110,51 @@ def _is_transient_graphql_error(errors: Any) -> bool:
 def _is_retryable_status(status: int) -> bool:
     # Treat common transient statuses as retryable.
     return status in (429, 502, 503, 504)
+
+
+# Permission requirements mapping for operations
+OPERATION_PERMISSIONS = {
+    "list_repos": {
+        "classic": "read:org scope",
+        "fine_grained": "Organization members: Read access",
+        "description": "List organization repositories",
+    },
+    "approve": {
+        "classic": "repo scope",
+        "fine_grained": "Pull requests: Read and write",
+        "description": "Approve pull requests",
+    },
+    "merge": {
+        "classic": "repo scope",
+        "fine_grained": "Contents: Read and write",
+        "description": "Merge pull requests",
+    },
+    "merge_workflow": {
+        "classic": "workflow scope (in addition to repo)",
+        "fine_grained": "Workflows: Read and write",
+        "description": "Merge pull requests that modify GitHub Actions workflows",
+    },
+    "update_branch": {
+        "classic": "repo scope",
+        "fine_grained": "Contents: Read and write, Pull requests: Read and write",
+        "description": "Update/rebase pull request branches",
+    },
+    "close": {
+        "classic": "repo scope",
+        "fine_grained": "Pull requests: Read and write",
+        "description": "Close pull requests",
+    },
+    "branch_protection": {
+        "classic": "repo scope",
+        "fine_grained": "Administration: Read access",
+        "description": "Read branch protection rules",
+    },
+    "checks": {
+        "classic": "repo scope (or workflow for actions)",
+        "fine_grained": "Actions: Read access, Workflows: Read access",
+        "description": "Read status checks and workflow runs",
+    },
+}
 
 
 async def _maybe_await(
@@ -200,6 +266,134 @@ class GitHubAsync:
     async def aclose(self) -> None:
         """Close underlying httpx client."""
         await self._client.aclose()
+
+    def _parse_permission_error(
+        self, error: Exception, operation: str, owner: str = "", repo: str = ""
+    ) -> PermissionError | None:
+        """Parse HTTP error to determine if it's a permission issue.
+
+        Args:
+            error: The exception that was raised
+            operation: The operation being performed (e.g., 'approve', 'merge')
+            owner: Repository owner (for context in error messages)
+            repo: Repository name (for context in error messages)
+
+        Returns:
+            PermissionError if this is a permission issue, None otherwise
+        """
+        error_str = str(error)
+
+        # Check for 401 (unauthorized/expired token)
+        if "401" in error_str or "Unauthorized" in error_str:
+            return PermissionError(
+                operation=operation,
+                message="Token authentication failed - token may be expired or invalid",
+                token_type_guidance={
+                    "classic": "Regenerate your token at: https://github.com/settings/tokens",
+                    "fine_grained": "Check token expiration at: https://github.com/settings/tokens?type=beta",
+                    "fix": "Run: gh auth refresh -h github.com",
+                },
+            )
+
+        # Check for 403 (forbidden/permission denied)
+        if "403" in error_str or "Forbidden" in error_str:
+            # Try to get more detailed error info from response
+            response_text = ""
+            if hasattr(error, "response") and hasattr(error.response, "text"):
+                try:
+                    response_text = error.response.text.lower()
+                except AttributeError:
+                    pass
+
+            error_lower = error_str.lower()
+
+            # Check for specific permission scenarios
+
+            # 1. Workflow scope (already handled but included for completeness)
+            if (
+                "refusing to allow" in response_text
+                and "workflow" in response_text
+                and operation == "merge"
+            ):
+                perms = OPERATION_PERMISSIONS.get("merge_workflow", {})
+                return PermissionError(
+                    operation="merge_workflow",
+                    message=f"Missing workflow permissions to merge PR in {owner}/{repo} that modifies GitHub Actions workflows",
+                    token_type_guidance={
+                        "classic": f"Add scope: {perms.get('classic', 'workflow')}",
+                        "fine_grained": f"Enable: {perms.get('fine_grained', 'Workflows: Read and write')}",
+                        "fix": "Run: gh auth refresh -h github.com -s workflow",
+                    },
+                )
+
+            # 2. Fine-grained token repository scope
+            if (
+                "resource not accessible" in response_text
+                or "not in scope" in error_lower
+            ):
+                return PermissionError(
+                    operation=operation,
+                    message=f"Repository {owner}/{repo} is not accessible with this token",
+                    token_type_guidance={
+                        "classic": "Token should have 'repo' scope for private repositories, or 'public_repo' for public repositories",
+                        "fine_grained": f"Add {owner}/{repo} to the token's repository access list at: https://github.com/settings/tokens",
+                        "fix": f"Edit your fine-grained token and add '{owner}/{repo}' to repository access",
+                    },
+                )
+
+            # 3. Operation-specific permission errors
+            perms = OPERATION_PERMISSIONS.get(operation, {})
+            if perms:
+                location = f" in {owner}/{repo}" if owner and repo else ""
+                return PermissionError(
+                    operation=operation,
+                    message=f"Insufficient permissions to {perms.get('description', operation)}{location}",
+                    token_type_guidance={
+                        "classic": f"Required scope: {perms.get('classic', 'repo')}",
+                        "fine_grained": f"Required permission: {perms.get('fine_grained', 'unknown')}",
+                        "fix": "Update your token permissions at: https://github.com/settings/tokens",
+                    },
+                )
+
+            # 4. Generic 403
+            return PermissionError(
+                operation=operation,
+                message=f"Permission denied for {operation} operation{' in ' + owner + '/' + repo if owner and repo else ''}",
+                token_type_guidance={
+                    "classic": "Ensure token has 'repo' scope for full repository access",
+                    "fine_grained": "Check that token has appropriate permissions and repository access",
+                    "fix": "Review and update token permissions at: https://github.com/settings/tokens",
+                },
+            )
+
+        # Check for 422 (unprocessable entity - often approval restrictions)
+        if "422" in error_str and operation == "approve":
+            if (
+                "review cannot be requested from pull request author"
+                in error_str.lower()
+            ):
+                return PermissionError(
+                    operation=operation,
+                    message="Cannot approve your own pull request",
+                    token_type_guidance={
+                        "classic": "GitHub does not allow self-approval of pull requests",
+                        "fine_grained": "GitHub does not allow self-approval of pull requests",
+                        "fix": "Request review from another team member",
+                    },
+                )
+            elif "unprocessable entity" in error_str.lower():
+                return PermissionError(
+                    operation=operation,
+                    message="Pull request approval failed - repository may have approval restrictions",
+                    token_type_guidance={
+                        "classic": "Check repository settings for review requirements",
+                        "fine_grained": "Check repository settings for review requirements",
+                        "fix": "Contact repository administrator to review branch protection rules",
+                    },
+                )
+
+        # Not a permission error we recognize
+        return None
 
     # --------------------------
     # Core request functionality
@@ -492,11 +686,20 @@ class GitHubAsync:
         Approve a pull request.
 
         REST: POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews
+
+        Raises:
+            PermissionError: If token lacks required permissions
         """
-        await self.post(
-            f"/repos/{owner}/{repo}/pulls/{number}/reviews",
-            json={"event": "APPROVE", "body": body},
-        )
+        try:
+            await self.post(
+                f"/repos/{owner}/{repo}/pulls/{number}/reviews",
+                json={"event": "APPROVE", "body": body},
+            )
+        except Exception as e:
+            perm_error = self._parse_permission_error(e, "approve", owner, repo)
+            if perm_error:
+                raise perm_error from e
+            raise
 
     async def merge_pull_request(
         self, owner: str, repo: str, number: int, merge_method: str = "merge"
@@ -505,15 +708,51 @@ class GitHubAsync:
         Merge a pull request.
 
         REST: PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge
+
+        Raises:
+            PermissionError: If token lacks required permissions
         """
         try:
+            self.log.debug(
+                f"Attempting to merge PR #{number} in {owner}/{repo} with method={merge_method}"
+            )
             data = await self.put(
                 f"/repos/{owner}/{repo}/pulls/{number}/merge",
                 json={"merge_method": merge_method},
             )
             # The API returns {"merged": true/false, ...}
-            return bool(data.get("merged", False))
+            merged = bool(data.get("merged", False))
+            if merged:
+                self.log.debug(f"Successfully merged PR #{number} in {owner}/{repo}")
+            else:
+                self.log.warning(
+                    f"GitHub API returned merged=false for PR #{number} in {owner}/{repo}: {data}"
+                )
+            return merged
         except Exception as e:
+            # Check for permission errors first (includes workflow scope check)
+            perm_error = self._parse_permission_error(e, "merge", owner, repo)
+            if perm_error:
+                # Log the detailed error for debugging
+                self.log.debug(
+                    f"Permission error merging PR #{number} in {owner}/{repo}: {perm_error}"
+                )
+                raise perm_error from e
+
+            # Log other errors
+            error_type = type(e).__name__
+            error_msg = str(e)
+            self.log.debug(
+                f"Merge API error for PR #{number} in {owner}/{repo}: {error_type}: {error_msg}"
+            )
+            raise
+            # Try to extract response body if available (for HTTPStatusError)
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                try:
+                    response_text = e.response.text
+                    self.log.debug(f"GitHub API response body: {response_text}")
+                except Exception:
+                    pass
             # Get PR details to check if the merge actually succeeded despite the exception
             try:
                 pr_data_response = await self.get(
@@ -606,10 +845,15 @@ class GitHubAsync:
             raise
 
     async def check_user_can_bypass_protection(
-        self, owner: str, repo: str
+        self, owner: str, repo: str, force_level: str = "code-owners"
     ) -> tuple[bool, str]:
         """
         Check if the authenticated user has permissions to bypass branch protection.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            force_level: The force level being used ("code-owners", "protection-rules", "all")
 
         Returns:
             Tuple of (can_bypass: bool, reason: str)
@@ -621,9 +865,13 @@ class GitHubAsync:
                 return False, "Could not fetch repository information"
 
             permissions = repo_data.get("permissions", {})
+            self.log.debug(
+                f"Repository permissions for {owner}/{repo}: admin={permissions.get('admin')}, push={permissions.get('push')}, pull={permissions.get('pull')}"
+            )
 
             # Check if user has admin permissions (which includes bypass)
             if permissions.get("admin"):
+                self.log.debug(f"User has admin permissions for {owner}/{repo}")
                 return True, "User has admin permissions"
 
             # Try to get more detailed permission info from user's repository membership
@@ -643,17 +891,28 @@ class GitHubAsync:
                             # admin permission can bypass
                             if permission_level == "admin":
                                 return True, "User has admin collaborator permissions"
-            except Exception:
+            except Exception as e:
                 # If we can't check detailed permissions, continue with basic check
+                self.log.debug(
+                    f"Could not check detailed collaborator permissions: {e}"
+                )
                 pass
 
-            # If we have push permissions but not admin, we likely can't bypass
+            # If we have push permissions but not admin
             if permissions.get("push"):
+                # All force levels require admin permissions to actually bypass branch protection
+                # at the GitHub API level. Push permissions alone are not sufficient.
+                self.log.debug(
+                    f"User has push permissions for {owner}/{repo} but not admin (required to bypass branch protection at GitHub API level)"
+                )
                 return (
                     False,
-                    "User has push permissions but not admin/bypass permissions",
+                    "User has push permissions but not admin/bypass permissions (admin required to bypass branch protection)",
                 )
 
+            self.log.debug(
+                f"User does not have sufficient permissions for {owner}/{repo}"
+            )
             return False, "User does not have bypass permissions"
 
         except Exception as e:
@@ -663,11 +922,137 @@ class GitHubAsync:
 
     async def update_branch(self, owner: str, repo: str, number: int) -> None:
         """
-        Update a pull request branch.
+        Update a pull request branch (rebase).
 
         REST: PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch
+
+        Raises:
+            PermissionError: If token lacks required permissions
         """
-        await self.put(f"/repos/{owner}/{repo}/pulls/{number}/update-branch")
+        try:
+            await self.put(f"/repos/{owner}/{repo}/pulls/{number}/update-branch")
+        except Exception as e:
+            perm_error = self._parse_permission_error(e, "update_branch", owner, repo)
+            if perm_error:
+                raise perm_error from e
+            raise
+
+    async def check_token_permissions(
+        self, operations: list[str], owner: str = "", repo: str = ""
+    ) -> dict[str, dict[str, Any]]:
+        """Pre-flight check for token permissions.
+
+        Tests whether the token has the necessary permissions for the specified
+        operations without actually performing them. This allows failing fast
+        with clear error messages before attempting bulk operations.
+
+        Args:
+            operations: List of operations to check (e.g., ['approve', 'merge', 'close'])
+            owner: Repository owner (required for repository-specific checks)
+            repo: Repository name (required for repository-specific checks)
+
+        Returns:
+            Dictionary mapping operation names to check results:
+            {
+                'operation_name': {
+                    'has_permission': bool,
+                    'error': str | None,
+                    'guidance': dict | None
+                }
+            }
+
+        Example:
+            >>> results = await client.check_token_permissions(['approve', 'merge'], 'owner', 'repo')
+            >>> if not results['approve']['has_permission']:
+            ...     print(results['approve']['error'])
+        """
+        results: dict[str, dict[str, Any]] = {}
+
+        for operation in operations:
+            result: dict[str, Any] = {
+                "has_permission": False,
+                "error": None,
+                "guidance": None,
+            }
+
+            try:
+                # Perform a lightweight check for each operation
+                if operation == "approve" and owner and repo:
+                    # Check if we can access PR reviews endpoint
+                    # Use a non-existent PR number to test permission without side effects
+                    try:
+                        await self.get(f"/repos/{owner}/{repo}/pulls/999999/reviews")
+                    except Exception as e:
+                        if "404" not in str(e):  # 404 is fine, means we have permission
+                            raise
+                    result["has_permission"] = True
+
+                elif operation == "merge" and owner and repo:
+                    # Check repository permissions
+                    repo_data = await self.get(f"/repos/{owner}/{repo}")
+                    if isinstance(repo_data, dict):
+                        permissions = repo_data.get("permissions", {})
+                        if permissions.get("push") or permissions.get("admin"):
+                            result["has_permission"] = True
+                        else:
+                            result["error"] = "Token lacks push/write permissions"
+                            perms = OPERATION_PERMISSIONS.get("merge", {})
+                            result["guidance"] = {
+                                "classic": perms.get("classic"),
+                                "fine_grained": perms.get("fine_grained"),
+                            }
+
+                elif operation == "close" and owner and repo:
+                    # Similar to approve - check PR access
+                    try:
+                        await self.get(
+                            f"/repos/{owner}/{repo}/pulls?state=closed&per_page=1"
+                        )
+                    except Exception as e:
+                        if "404" not in str(e):
+                            raise
+                    result["has_permission"] = True
+
+                elif operation == "update_branch" and owner and repo:
+                    # Check repository write permissions
+                    repo_data = await self.get(f"/repos/{owner}/{repo}")
+                    if isinstance(repo_data, dict):
+                        permissions = repo_data.get("permissions", {})
+                        if permissions.get("push") or permissions.get("admin"):
+                            result["has_permission"] = True
+                        else:
+                            result["error"] = (
+                                "Token lacks push/write permissions for branch updates"
+                            )
+                            perms = OPERATION_PERMISSIONS.get("update_branch", {})
+                            result["guidance"] = {
+                                "classic": perms.get("classic"),
+                                "fine_grained": perms.get("fine_grained"),
+                            }
+
+                elif operation == "list_repos":
+                    # Check organization access
+                    if owner:
+                        await self.get(f"/orgs/{owner}/repos?per_page=1")
+                    result["has_permission"] = True
+
+                else:
+                    result["error"] = f"Unknown operation: {operation}"
+
+            except Exception as e:
+                perm_error = self._parse_permission_error(e, operation, owner, repo)
+                if perm_error:
+                    result["has_permission"] = False
+                    result["error"] = str(perm_error)
+                    result["guidance"] = perm_error.token_type_guidance
+                else:
+                    # Unexpected error - be conservative
+                    result["has_permission"] = False
+                    result["error"] = f"Could not verify permissions: {str(e)}"
+
+            results[operation] = result
+
+        return results
 
     async def close_pull_request(
         self, owner: str, repo: str, number: int
@@ -682,10 +1067,19 @@ class GitHubAsync:
 
         Returns:
             Updated pull request data
+
+        Raises:
+            PermissionError: If token lacks required permissions
         """
-        return await self.patch(
-            f"/repos/{owner}/{repo}/pulls/{number}", json={"state": "closed"}
-        )
+        try:
+            return await self.patch(
+                f"/repos/{owner}/{repo}/pulls/{number}", json={"state": "closed"}
+            )
+        except Exception as e:
+            perm_error = self._parse_permission_error(e, "close", owner, repo)
+            if perm_error:
+                raise perm_error from e
+            raise
 
     async def analyze_block_reason(
         self, owner: str, repo: str, number: int, head_sha: str

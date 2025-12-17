@@ -757,7 +757,7 @@ class GitHubService:
 
             self._branch_protection_cache[cache_key] = protection
 
-            self.log.info(
+            self.log.debug(
                 f"Branch protection for {owner}/{repo}:{branch}: "
                 f"requiresLinearHistory={protection.get('requiresLinearHistory', False)}, "
                 f"allowsMergeCommits={protection.get('allowsMergeCommits')}, "
@@ -768,9 +768,20 @@ class GitHubService:
             return protection
 
         except Exception as e:
-            self.log.warning(
-                f"Failed to get branch protection for {owner}/{repo}:{branch}: {e}"
-            )
+            error_str = str(e)
+            # Check for permission errors
+            if (
+                "FORBIDDEN" in error_str
+                and "Resource not accessible by personal access token" in error_str
+            ):
+                self.log.debug(
+                    f"Cannot access branch protection for {owner}/{repo}:{branch}: Missing 'Administration: Read-only' permission. "
+                    f"For fine-grained tokens, enable 'Administration: Read-only'. For classic tokens, ensure 'repo' scope is enabled."
+                )
+            else:
+                self.log.warning(
+                    f"Failed to get branch protection for {owner}/{repo}:{branch}: {e}"
+                )
             # Cache the None result to avoid repeated failures
             self._branch_protection_cache[cache_key] = None
             return None

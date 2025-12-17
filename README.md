@@ -238,7 +238,7 @@ requests.
 
 ### Configuring a GitHub Personal Access Token
 
-Fine-grained access tokens are not supported due to gaps in the permission schema.
+Dependamerge supports both **classic** and **fine-grained** personal access tokens.
 
 To configure a GitHub personal access token for use with dependamerge, go to:
 
@@ -246,17 +246,41 @@ To configure a GitHub personal access token for use with dependamerge, go to:
 
 Then:
 
-Profile → Settings → Developer settings → Personal access tokens → Tokens (classic)
+Profile → Settings → Developer settings → Personal access tokens
+
+#### Option 1: Fine-Grained Personal Access Tokens (Recommended)
+
+Fine-grained tokens → Generate new token
+
+**Required Repository Permissions:**
+
+- **Contents**: Read and write (for merging PRs and accessing file changes)
+- **Pull requests**: Read and write (for creating reviews, approving, and merging)
+- **Workflows**: Read and write (for PRs that change GitHub Actions workflows)
+- **Administration**: Read access (for reading branch protection rules)
+- **Metadata**: Read access (automatically included)
+
+**Required Account Permissions:**
+
+- **Organization members**: Read access (to access organization repositories)
+
+**Repository Access:**
+
+- Select "All repositories" or specify which repositories to access
+
+#### Option 2: Tokens (Classic)
 
 **Required Scopes:**
 
-- `repo` - Full control of private repositories (includes all repository permissions)
-- **OR** `public_repo` - Access to public repositories (if working with public repos)
 - `read:org` - Read organization membership, teams, and repositories
-- `workflow` - Update GitHub Actions workflows (needed for some PR status
-  checks)
+- `workflow` - Update GitHub Actions workflows (needed for PRs modifying workflows)
 
-**What the tool does with these permissions:**
+One of the two options below is also needed:
+
+- `public_repo` - Access to public repositories (if working with public repos)
+- `repo` - Full control of private repositories (includes all repository permissions)
+
+#### What the tool does with these permissions
 
 - **Read Operations**: Access PR details, file changes, reviews, commits, check
   runs, and repository lists
@@ -826,7 +850,8 @@ Failed to fetch organization repositories
 
 Solution: Ensure your token has the required permissions:
 
-- `read:org` scope
+- **Classic tokens**: `read:org` scope
+- **Fine-grained tokens**: "Organization members: Read access" permission
 
 ### Write Permission Error
 
@@ -836,7 +861,19 @@ Solution: Ensure your token has the required permissions:
 
 Solution: Ensure your token has write permissions:
 
-- `repo` scope (or `public_repo` for public repositories)
+- **Classic tokens**: `repo` scope (or `public_repo` for public repositories)
+- **Fine-grained tokens**: "Contents: Read and write" permission
+
+### Pull Request Review Permission Error
+
+```text
+Failed to approve PR: Missing 'Pull requests: Read and write' permission
+```
+
+Solution: Ensure your token can create PR reviews:
+
+- **Classic tokens**: `repo` scope (includes PR review permissions)
+- **Fine-grained tokens**: "Pull requests: Read and write" permission
 
 ### Actions/Checks Access Error
 
@@ -846,7 +883,8 @@ Failed to check PR status
 
 Solution: Add workflow/actions permissions:
 
-- `workflow` scope
+- **Classic tokens**: `workflow` scope
+- **Fine-grained tokens**: "Workflows: Read and write" permission
 
 #### No Similar PRs Found
 
