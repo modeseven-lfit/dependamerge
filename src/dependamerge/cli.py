@@ -3,6 +3,7 @@
 
 import asyncio
 import hashlib
+import logging
 import os
 import sys
 
@@ -28,7 +29,15 @@ from .error_codes import (
     is_network_error,
 )
 from .git_ops import GitError
-from .github_async import GraphQLError, RateLimitError, SecondaryRateLimitError
+from .github_async import (
+    GitHubAsync,
+    GraphQLError,
+    RateLimitError,
+    SecondaryRateLimitError,
+)
+from .github_async import (
+    PermissionError as GitHubPermissionError,
+)
 from .github_client import GitHubClient
 from .github_service import AUTOMATION_TOOLS
 from .merge_manager import AsyncMergeManager
@@ -36,6 +45,7 @@ from .models import PullRequestInfo
 from .pr_comparator import PRComparator
 from .progress_tracker import MergeProgressTracker, ProgressTracker
 from .resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
+from .system_utils import get_default_workers
 
 # Constants
 MAX_RETRIES = 2
@@ -227,6 +237,12 @@ def merge(
         "--force",
         help="Override level: 'none', 'code-owners', 'protection-rules', 'all' (default: code-owners)",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable verbose debug logging",
+    ),
 ):
     """
     Bulk approve/merge pull requests across a GitHub organization.
@@ -254,6 +270,22 @@ def merge(
     - protection-rules: Bypass branch protection checks (requires permissions)
     - all: Attempt merge despite most warnings (not recommended)
     """
+    # Configure logging
+    if verbose:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(levelname)s - %(message)s",
+        )
+        # Suppress noisy HTTP request logs from httpx and httpcore unless verbose
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("hpack").setLevel(logging.WARNING)
+
     # Validate force level
     valid_force_levels = ["none", "code-owners", "protection-rules", "all"]
     if force not in valid_force_levels:
@@ -493,6 +525,54 @@ def merge(
         for target_pr, comparison in all_similar_prs:
             console.print(f"  • {target_pr.repository_full_name} #{target_pr.number}")
             console.print(f"    {_format_condensed_similarity(comparison)}")
+
+        # Pre-flight permission check (for non-confirm mode only, to fail fast)
+        if no_confirm and len(all_similar_prs) > 0:
+            console.print("\n🔍 Checking token permissions...")
+
+            # Check permissions on the source repository
+            async def _check_permissions():
+                async with GitHubAsync(token=token) as client:
+                    operations = ["approve", "merge"]
+                    if not no_fix:
+                        operations.append("update_branch")
+                    return await client.check_token_permissions(
+                        operations, owner, repo_name
+                    )
+
+            try:
+                perm_results = asyncio.run(_check_permissions())
+
+                # Check if any required permissions are missing
+                missing_perms = [
+                    op
+                    for op, result in perm_results.items()
+                    if not result["has_permission"]
+                ]
+
+                if missing_perms:
+                    console.print("\n❌ Token Permission Check Failed:\n")
+                    for op in missing_perms:
+                        result = perm_results[op]
+                        console.print(f"   • {op}: {result['error']}")
+                        if result.get("guidance"):
+                            console.print(
+                                f"     Classic: {result['guidance'].get('classic', 'N/A')}"
+                            )
+                            console.print(
+                                f"     Fine-grained: {result['guidance'].get('fine_grained', 'N/A')}"
+                            )
+                    console.print("\n💡 Update your token permissions and try again.")
+                    raise typer.Exit(code=3)
+
+                console.print("✅ Token has required permissions\n")
+            except GitHubPermissionError as e:
+                console.print(f"\n❌ Permission check failed: {e}")
+                raise typer.Exit(code=3) from e
+            except Exception as e:
+                # Don't fail on permission check errors, just warn
+                console.print(f"⚠️  Could not verify permissions: {e}")
+                console.print("   Continuing anyway...\n")
 
         if not no_confirm:
             # IMPORTANT: Each PR must produce exactly ONE line of output in this section
@@ -1224,8 +1304,10 @@ def blocked(
         "--keep-temp",
         help="Keep the temporary workspace for inspection after completion",
     ),
-    prefetch: int = typer.Option(
-        6, "--prefetch", help="Number of repositories to prepare in parallel"
+    prefetch: int | None = typer.Option(
+        None,
+        "--prefetch",
+        help="Number of repositories to prepare in parallel (auto-detects CPU cores if not specified)",
     ),
     editor: str | None = typer.Option(
         None,
@@ -1360,7 +1442,9 @@ def blocked(
                 fix_options = FixOptions(
                     workdir=workdir,
                     keep_temp=keep_temp,
-                    prefetch=prefetch,
+                    prefetch=prefetch
+                    if prefetch is not None
+                    else get_default_workers(),
                     editor=editor,
                     mergetool=mergetool,
                     interactive=interactive,

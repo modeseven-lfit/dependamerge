@@ -14,8 +14,10 @@ from rich.console import Console
 
 from .copilot_handler import CopilotCommentHandler
 from .github_async import GitHubAsync
+from .github_async import PermissionError as GitHubPermissionError
 from .github_service import GitHubService
 from .models import ComparisonResult, PullRequestInfo
+from .output_utils import log_and_print
 from .progress_tracker import MergeProgressTracker
 
 
@@ -88,13 +90,8 @@ class AsyncMergeManager:
         # Track merge methods per repository
         self._pr_merge_methods: dict[str, str] = {}
 
-    def _log_and_print(self, message: str, style: str | None = None) -> None:
-        """Log message and also print to stdout for CLI visibility."""
-        self.log.info(message)
-        if style:
-            self._console.print(message, style=style)
-        else:
-            print(message)
+        # Track last merge exception per PR for better error reporting
+        self._last_merge_exception: dict[str, Exception] = {}
 
     def _get_mergeability_icon_and_style(
         self, mergeable_state: str | None
@@ -153,7 +150,7 @@ class AsyncMergeManager:
         if self.preview_mode:
             self.log.info(f"🔍 PREVIEW: Would merge {len(pr_list)} PRs")
         else:
-            self.log.info(f"Starting parallel merge of {len(pr_list)} PRs")
+            self.log.debug(f"Starting parallel merge of {len(pr_list)} PRs")
 
         # Create tasks for all PRs
         tasks = []
@@ -219,7 +216,12 @@ class AsyncMergeManager:
             if pr_info.state != "open":
                 result.status = MergeStatus.FAILED
                 result.error = "PR is already closed"
-                self._console.print(f"🛑 Failed: {pr_info.html_url} \\[already closed]")
+                log_and_print(
+                    self.log,
+                    self._console,
+                    f"🛑 Failed: {pr_info.html_url} [already closed]",
+                    level="warning",
+                )
                 return result
 
             if not self._is_pr_mergeable(pr_info):
@@ -277,15 +279,18 @@ class AsyncMergeManager:
                 ):
                     result.status = MergeStatus.BLOCKED
                     icon = "🛑"
-                    self._console.print(
-                        f"{icon} Blocked: {pr_info.html_url} \\[{skip_reason}]"
-                    )
+                    status = "Blocked"
                 else:
                     result.status = MergeStatus.SKIPPED
                     icon = "⏭️"
-                    self._console.print(
-                        f"{icon} Skipped: {pr_info.html_url} \\[{skip_reason}]"
-                    )
+                    status = "Skipped"
+
+                log_and_print(
+                    self.log,
+                    self._console,
+                    f"{icon} {status}: {pr_info.html_url} [{skip_reason}]",
+                    level="info",
+                )
 
                 result.error = f"PR is not mergeable (state: {pr_info.mergeable_state}, mergeable: {pr_info.mergeable})"
 
@@ -301,11 +306,11 @@ class AsyncMergeManager:
                 if self.force_level != "all":
                     result.status = MergeStatus.SKIPPED
                     result.error = "PR has reviews requesting changes - will not override human feedback"
-                    self._console.print(
-                        f"⏭️ Skipped: {pr_info.html_url} \\[has reviews requesting changes]"
-                    )
-                    self.log.info(
-                        f"⏭️  Skipping {pr_info.repository_full_name}#{pr_info.number}: {result.error}"
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"⏭️ Skipped: {pr_info.html_url} [has reviews requesting changes]",
+                        level="info",
                     )
                     return result
                 else:
@@ -323,11 +328,11 @@ class AsyncMergeManager:
             if not can_merge:
                 result.status = MergeStatus.SKIPPED
                 result.error = f"Merge requirements not met: {merge_check_reason}"
-                self._console.print(
-                    f"⏭️ Skipped: {pr_info.html_url} \\[{merge_check_reason.lower()}]"
-                )
-                self.log.info(
-                    f"⏭️  Skipping {pr_info.repository_full_name}#{pr_info.number}: {result.error}"
+                log_and_print(
+                    self.log,
+                    self._console,
+                    f"⏭️ Skipped: {pr_info.html_url} [{merge_check_reason.lower()}]",
+                    level="info",
                 )
                 return result
 
@@ -357,8 +362,11 @@ class AsyncMergeManager:
             if not copilot_processing_successful:
                 result.status = MergeStatus.FAILED
                 result.error = "Copilot review processing incomplete - not approving to avoid pollution"
-                self._console.print(
-                    f"❌ Failed: {pr_info.html_url} \\[copilot processing incomplete]"
+                log_and_print(
+                    self.log,
+                    self._console,
+                    f"❌ Failed: {pr_info.html_url} [copilot processing incomplete]",
+                    level="error",
                 )
                 return result
 
@@ -385,11 +393,11 @@ class AsyncMergeManager:
                     # The preview output should only be a single line per PR in the evaluation section
                     pass
                 else:
-                    self.log.info(
-                        f"PR {pr_info.repository_full_name}#{pr_info.number} is behind - rebasing before merge"
-                    )
-                    self._console.print(
-                        f"🔄 Rebasing {pr_info.html_url} (behind base branch)"
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"🔄 Rebasing: {pr_info.html_url} [behind base branch]",
+                        level="debug",
                     )
 
                     try:
@@ -461,26 +469,34 @@ class AsyncMergeManager:
                         pr_info.mergeable = updated_mergeable
                         pr_info.mergeable_state = updated_mergeable_state
 
-                        self.log.info(
-                            f"After rebase: PR {pr_info.repository_full_name}#{pr_info.number} state is {pr_info.mergeable_state}"
-                        )
-
                         # Report post-rebase status
                         if pr_info.mergeable_state == "clean":
-                            self._console.print(
-                                f"✅ Rebase completed successfully for {pr_info.html_url}"
+                            log_and_print(
+                                self.log,
+                                self._console,
+                                f"✅ Rebase successful: {pr_info.html_url}",
+                                level="debug",
                             )
                         elif pr_info.mergeable_state == "behind":
-                            self._console.print(
-                                f"⚠️  PR {pr_info.html_url} still behind after rebase - may need manual intervention"
+                            log_and_print(
+                                self.log,
+                                self._console,
+                                f"⚠️  Rebase incomplete: {pr_info.html_url} [still behind after rebase]",
+                                level="debug",
                             )
                         elif pr_info.mergeable_state == "blocked":
-                            self._console.print(
-                                f"⏳ PR {pr_info.html_url} rebased, waiting for status checks..."
+                            log_and_print(
+                                self.log,
+                                self._console,
+                                f"⏳ Rebase complete: {pr_info.html_url} [waiting for status checks]",
+                                level="debug",
                             )
                         else:
-                            self._console.print(
-                                f"ℹ️  PR {pr_info.html_url} rebased, current state: {pr_info.mergeable_state}"
+                            log_and_print(
+                                self.log,
+                                self._console,
+                                f"ℹ️  Rebase complete: {pr_info.html_url} [state: {pr_info.mergeable_state}]",
+                                level="debug",
                             )
 
                     except Exception as e:
@@ -489,8 +505,11 @@ class AsyncMergeManager:
 
                         if self.progress_tracker:
                             self.progress_tracker.merge_failure()
-                        self._console.print(
-                            f"❌ Failed: {pr_info.html_url} \\[rebase error: {e}]"
+                        log_and_print(
+                            self.log,
+                            self._console,
+                            f"❌ Failed: {pr_info.html_url} [rebase error: {e}]",
+                            level="error",
                         )
                         return result
 
@@ -505,7 +524,7 @@ class AsyncMergeManager:
                     result.status = MergeStatus.SKIPPED
                     result.error = "PR is behind base branch and --no-fix option is set"
                     self._console.print(
-                        f"⏭️ Skipped: {pr_info.html_url} \\[behind, rebase disabled]"
+                        f"⏭️ Skipped: {pr_info.html_url} [behind, rebase disabled]"
                     )
                 elif pr_info.mergeable_state == "behind" and self.fix_out_of_date:
                     # For behind PRs with fix enabled, show warning with rebase info
@@ -514,13 +533,13 @@ class AsyncMergeManager:
                     if self.progress_tracker:
                         self.progress_tracker.merge_success()
                     self._console.print(
-                        f"⚠️  Rebase/merge: {pr_info.html_url} \\[behind base branch]"
+                        f"⚠️  Rebase/merge: {pr_info.html_url} [behind base branch]"
                     )
                 elif pr_info.mergeable_state == "dirty":
                     result.status = MergeStatus.BLOCKED
                     result.error = "PR has merge conflicts"
                     self._console.print(
-                        f"🛑 Blocked: {pr_info.html_url} \\[merge conflicts]"
+                        f"🛑 Blocked: {pr_info.html_url} [merge conflicts]"
                     )
                 elif (
                     pr_info.mergeable is False and pr_info.mergeable_state == "blocked"
@@ -528,7 +547,7 @@ class AsyncMergeManager:
                     result.status = MergeStatus.BLOCKED
                     result.error = "PR blocked by failing checks"
                     self._console.print(
-                        f"🛑 Blocked: {pr_info.html_url} \\[blocked by failing checks]"
+                        f"🛑 Blocked: {pr_info.html_url} [blocked by failing checks]"
                     )
                 else:
                     # Simulate successful merge in preview mode
@@ -536,7 +555,12 @@ class AsyncMergeManager:
                     if self.progress_tracker:
                         self.progress_tracker.merge_success()
                     # Single line summary for successful preview
-                    self._console.print(f"☑️ Approve/merge: {pr_info.html_url}")
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"☑️ Approve/merge: {pr_info.html_url}",
+                        level="info",
+                    )
             else:
                 if self.progress_tracker:
                     self.progress_tracker.update_operation(
@@ -550,9 +574,11 @@ class AsyncMergeManager:
                     if self.progress_tracker:
                         self.progress_tracker.merge_success()
                     # Single line summary for successful merge
-                    self._console.print(f"✅ Success: {pr_info.html_url}")
-                    self.log.info(
-                        f"✅ Merge successful for PR {pr_info.repository_full_name}#{pr_info.number}"
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"✅ Merged: {pr_info.html_url}",
+                        level="info",
                     )
                 else:
                     result.status = MergeStatus.FAILED
@@ -561,9 +587,50 @@ class AsyncMergeManager:
                         self.progress_tracker.merge_failure()
                     # Single line summary for failed merge with reason
                     failure_reason = self._get_failure_summary(pr_info)
-                    self._console.print(
-                        f"❌ Failed: {pr_info.html_url} \\[{failure_reason}]"
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"❌ Failed: {pr_info.html_url} [{failure_reason}]",
+                        level="error",
                     )
+
+        except GitHubPermissionError as e:
+            # Handle permission errors with detailed guidance
+            result.status = MergeStatus.FAILED
+            result.error = str(e)
+            if self.progress_tracker:
+                self.progress_tracker.merge_failure()
+
+            # Extract operation-specific error message
+            operation_desc = e.operation.replace("_", " ")
+            log_and_print(
+                self.log,
+                self._console,
+                f"❌ Failed: {pr_info.html_url} [permission denied: {operation_desc}]",
+                level="error",
+            )
+
+            # Provide token-specific guidance
+            self._console.print("\n💡 Token Permission Issue:")
+            self._console.print(f"   Problem: {e}")
+
+            if e.token_type_guidance:
+                self._console.print("\n   For Classic Tokens:")
+                self._console.print(
+                    f"   • {e.token_type_guidance.get('classic', 'Check token scopes')}"
+                )
+                self._console.print("\n   For Fine-Grained Tokens:")
+                self._console.print(
+                    f"   • {e.token_type_guidance.get('fine_grained', 'Check token permissions')}"
+                )
+                if "fix" in e.token_type_guidance:
+                    self._console.print("\n   Quick Fix:")
+                    self._console.print(f"   • {e.token_type_guidance['fix']}")
+
+            self._console.print()
+            self.log.error(
+                f"Permission error processing PR {pr_info.repository_full_name}#{pr_info.number}: {e}"
+            )
 
         except Exception as e:
             result.status = MergeStatus.FAILED
@@ -571,16 +638,13 @@ class AsyncMergeManager:
             if self.progress_tracker:
                 self.progress_tracker.merge_failure()
 
-            # Provide clean single-line error messages instead of dumping HTTP details
-            error_str = str(e)
-            if "Failed to approve PR" in error_str and "422" in error_str:
-                reason = "cannot approve"
-                if "Unprocessable Entity" in error_str:
-                    reason = "approval restrictions"
-                self._console.print(f"❌ Failed: {pr_info.html_url} [{reason}]")
-            else:
-                # For other errors, use the existing detailed logging but clean console output
-                self._console.print(f"❌ Failed: {pr_info.html_url} [processing error]")
+            # Provide clean single-line error messages for other errors
+            log_and_print(
+                self.log,
+                self._console,
+                f"❌ Failed: {pr_info.html_url} [processing error]",
+                level="error",
+            )
 
             self.log.error(
                 f"Error processing PR {pr_info.repository_full_name}#{pr_info.number}: {e}"
@@ -627,13 +691,13 @@ class AsyncMergeManager:
         elif pr_info.mergeable is None:
             # Handle UNKNOWN mergeable state - treat as potentially mergeable
             # GitHub is still calculating mergeable state, but we can attempt merge
-            self.log.info(
+            self.log.debug(
                 f"ℹ️ PR {pr_info.number} in {pr_info.repository_full_name} has unknown mergeable state - treating as potentially mergeable"
             )
             return True
 
         # All other cases are considered mergeable
-        self.log.info(
+        self.log.debug(
             f"✅ PR {pr_info.number} in {pr_info.repository_full_name} is considered mergeable (mergeable: {pr_info.mergeable}, state: {pr_info.mergeable_state})"
         )
         return True
@@ -734,13 +798,22 @@ class AsyncMergeManager:
                 if self.force_level in ["code-owners", "protection-rules", "all"]:
                     # Check if user has permissions to bypass before attempting
                     if self._github_client:
+                        self.log.debug(
+                            f"Checking bypass permissions for {repo_owner}/{repo_name} with force_level={self.force_level}"
+                        )
                         (
                             can_bypass,
                             bypass_reason,
                         ) = await self._github_client.check_user_can_bypass_protection(
-                            repo_owner, repo_name
+                            repo_owner, repo_name, self.force_level
+                        )
+                        self.log.debug(
+                            f"Bypass check result: can_bypass={can_bypass}, reason={bypass_reason}"
                         )
                         if not can_bypass:
+                            self.log.warning(
+                                f"Cannot bypass branch protection for {repo_owner}/{repo_name}#{pr_info.number}: {bypass_reason}"
+                            )
                             return (
                                 False,
                                 f"cannot bypass branch protection: {bypass_reason}",
@@ -858,9 +931,8 @@ class AsyncMergeManager:
                                 review.get("user", {}).get("login") == current_user
                                 and review.get("state") == "APPROVED"
                             ):
-                                self._log_and_print(
-                                    f"⏩ Already approved: {owner}/{repo}#{pr_number} [{current_user}]",
-                                    "blue",
+                                self.log.debug(
+                                    f"⏩ Already approved: {owner}/{repo}#{pr_number} [{current_user}]"
                                 )
                                 return False
 
@@ -882,9 +954,8 @@ class AsyncMergeManager:
                                 for review in approved_reviews
                             ]
                             approvers_str = ", ".join(approvers)
-                            self._log_and_print(
-                                f"⏩ Already approved: {owner}/{repo}#{pr_number} [{approvers_str}]",
-                                "blue",
+                            self.log.debug(
+                                f"⏩ Already approved: {owner}/{repo}#{pr_number} [{approvers_str}]"
                             )
                             return False
 
@@ -893,13 +964,20 @@ class AsyncMergeManager:
             )
             return True
         except Exception as e:
-            # Handle 422 errors specifically
+            # Handle specific error codes
             error_str = str(e)
-            if "422" in error_str and "Unprocessable Entity" in error_str:
+
+            # Check for 403 Forbidden - missing pull request review permissions
+            if "403" in error_str and "Forbidden" in error_str:
+                raise RuntimeError(
+                    f"Failed to approve PR {owner}/{repo}#{pr_number}: Missing 'Pull requests: Read and write' permission. "
+                    f"For fine-grained tokens, enable 'Pull requests: Read and write' access. "
+                    f"For classic tokens, ensure 'repo' scope is enabled."
+                ) from e
+            elif "422" in error_str and "Unprocessable Entity" in error_str:
                 # This usually means the PR can't be approved (e.g., already approved by user, or other restrictions)
-                self._log_and_print(
-                    f"⏩ Already approved: {owner}/{repo}#{pr_number} [cannot approve - already approved or restricted]",
-                    "blue",
+                self.log.debug(
+                    f"⏩ Already approved: {owner}/{repo}#{pr_number} [cannot approve - already approved or restricted]"
                 )
                 return False
             else:
@@ -961,14 +1039,17 @@ class AsyncMergeManager:
                 )
 
                 # Attempt the merge
+                self.log.debug(
+                    f"Attempting merge for {owner}/{repo}#{pr_info.number} with method={merge_method}"
+                )
                 merged = await self._github_client.merge_pull_request(
                     owner, repo, pr_info.number, merge_method
                 )
+                self.log.debug(
+                    f"Merge API returned {merged} for {owner}/{repo}#{pr_info.number}"
+                )
 
                 if merged:
-                    self.log.info(
-                        f"✅ Merge API returned success for PR {owner}/{repo}#{pr_info.number}"
-                    )
                     return True
 
                 # Merge failed, check if we can fix it
@@ -992,6 +1073,13 @@ class AsyncMergeManager:
 
             except Exception as e:
                 error_msg = str(e)
+
+                # Store exception for better error reporting
+                pr_key = f"{owner}/{repo}#{pr_info.number}"
+                self._last_merge_exception[pr_key] = e
+                self.log.debug(
+                    f"Stored exception for {pr_key}: {type(e).__name__}: {str(e)[:200]}"
+                )
 
                 # Enhanced error handling with specific status code checks
                 if "405" in error_msg and "Method Not Allowed" in error_msg:
@@ -1040,6 +1128,9 @@ class AsyncMergeManager:
                 # Wait a bit before retrying
                 await asyncio.sleep(1.0)
 
+        self.log.debug(
+            f"_merge_pr_with_retry returning False for {owner}/{repo}#{pr_info.number} after all retries"
+        )
         return False
 
     def _get_failure_summary(self, pr_info: PullRequestInfo) -> str:
@@ -1052,6 +1143,23 @@ class AsyncMergeManager:
         Returns:
             Detailed description of why the merge failed
         """
+        # Check if we have a stored exception for this PR
+        pr_key = f"{pr_info.repository_full_name}#{pr_info.number}"
+        last_exception = self._last_merge_exception.get(pr_key)
+        self.log.debug(
+            f"_get_failure_summary called for {pr_key}, mergeable_state={pr_info.mergeable_state}, mergeable={pr_info.mergeable}, has_exception={last_exception is not None}"
+        )
+        if last_exception:
+            error_msg = str(last_exception)
+            self.log.debug(f"Last exception for {pr_key}: {error_msg[:200]}")
+            # Check for workflow scope error - be very specific to avoid false positives
+            # Only match the exact error message pattern we raise in github_async.py
+            if "Missing 'workflow' scope" in error_msg:
+                return "missing 'workflow' token scope"
+            # Check for other permission errors
+            elif "403" in error_msg and "forbidden" in error_msg.lower():
+                return "insufficient permissions"
+
         if pr_info.mergeable_state == "behind":
             return "behind base branch"
         elif pr_info.mergeable_state == "blocked":

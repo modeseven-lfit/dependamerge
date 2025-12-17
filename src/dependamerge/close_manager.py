@@ -12,7 +12,9 @@ from enum import Enum
 from rich.console import Console
 
 from .github_async import GitHubAsync
+from .github_async import PermissionError as GitHubPermissionError
 from .models import ComparisonResult, PullRequestInfo
+from .output_utils import log_and_print
 from .progress_tracker import MergeProgressTracker
 
 
@@ -134,11 +136,11 @@ class AsyncCloseManager:
                 if pr_info.state != "open":
                     result.status = CloseStatus.SKIPPED
                     result.error = f"PR is already {pr_info.state}"
-                    self._console.print(
-                        f"⏭️ Skipped: {pr_info.html_url} [already {pr_info.state}]"
-                    )
-                    self.log.info(
-                        f"⏭️  Skipping {pr_info.repository_full_name}#{pr_info.number}: {result.error}"
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"⏭️ Skipped: {pr_info.html_url} [already {pr_info.state}]",
+                        level="info",
                     )
                     self._results.append(result)
                     return result
@@ -147,9 +149,11 @@ class AsyncCloseManager:
                 if pr_info.mergeable_state == "draft":
                     result.status = CloseStatus.SKIPPED
                     result.error = "PR is a draft"
-                    self._console.print(f"⏭️ Skipped: {pr_info.html_url} [draft PR]")
-                    self.log.info(
-                        f"⏭️  Skipping {pr_info.repository_full_name}#{pr_info.number}: {result.error}"
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"⏭️ Skipped: {pr_info.html_url} [draft PR]",
+                        level="info",
                     )
                     self._results.append(result)
                     return result
@@ -161,8 +165,11 @@ class AsyncCloseManager:
                     result.error = (
                         f"Invalid repository name: {pr_info.repository_full_name}"
                     )
-                    self._console.print(
-                        f"❌ Failed: {pr_info.html_url} [{result.error}]"
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"❌ Failed: {pr_info.html_url} [{result.error}]",
+                        level="error",
                     )
                     self._results.append(result)
                     return result
@@ -173,9 +180,11 @@ class AsyncCloseManager:
                 if self.preview_mode:
                     # Preview mode: just mark as would-close
                     result.status = CloseStatus.CLOSED
-                    self._console.print(f"☑️ Would close: {pr_info.html_url}")
-                    self.log.info(
-                        f"☑️  Would close {pr_info.repository_full_name}#{pr_info.number} (preview)"
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"☑️ Would close: {pr_info.html_url}",
+                        level="info",
                     )
                 else:
                     # Actually close the PR
@@ -200,9 +209,11 @@ class AsyncCloseManager:
 
                             result.status = CloseStatus.CLOSED
                             success = True
-                            self._console.print(f"✅ Success: {pr_info.html_url}")
-                            self.log.info(
-                                f"✅  Closed {pr_info.repository_full_name}#{pr_info.number}"
+                            log_and_print(
+                                self.log,
+                                self._console,
+                                f"✅ Closed: {pr_info.html_url}",
+                                level="info",
                             )
 
                         except Exception as e:
@@ -219,18 +230,53 @@ class AsyncCloseManager:
                                     f"❌ Failed: {pr_info.html_url} [{error_msg}]"
                                 )
                                 self.log.error(
-                                    f"❌  Failed to close {pr_info.repository_full_name}#{pr_info.number}: {error_msg}"
+                                    f"Failed to close {pr_info.repository_full_name}#{pr_info.number}: {error_msg}"
                                 )
                             else:
                                 # Wait before retrying
                                 await asyncio.sleep(2**attempt)
+
+            except GitHubPermissionError as e:
+                # Handle permission errors with detailed guidance
+                result.status = CloseStatus.FAILED
+                result.error = str(e)
+
+                operation_desc = e.operation.replace("_", " ")
+                log_and_print(
+                    self.log,
+                    self._console,
+                    f"❌ Failed: {pr_info.html_url} [permission denied: {operation_desc}]",
+                    level="error",
+                )
+
+                # Provide token-specific guidance
+                self._console.print("\n💡 Token Permission Issue:")
+                self._console.print(f"   Problem: {e}")
+
+                if e.token_type_guidance:
+                    self._console.print("\n   For Classic Tokens:")
+                    self._console.print(
+                        f"   • {e.token_type_guidance.get('classic', 'Check token scopes')}"
+                    )
+                    self._console.print("\n   For Fine-Grained Tokens:")
+                    self._console.print(
+                        f"   • {e.token_type_guidance.get('fine_grained', 'Check token permissions')}"
+                    )
+                    if "fix" in e.token_type_guidance:
+                        self._console.print("\n   Quick Fix:")
+                        self._console.print(f"   • {e.token_type_guidance['fix']}")
+
+                self._console.print()
+                self.log.error(
+                    f"Permission error closing {pr_info.repository_full_name}#{pr_info.number}: {e}"
+                )
 
             except Exception as e:
                 result.status = CloseStatus.FAILED
                 result.error = f"Unexpected error: {e}"
                 self._console.print(f"❌ Failed: {pr_info.html_url} [{result.error}]")
                 self.log.error(
-                    f"❌  Unexpected error closing {pr_info.repository_full_name}#{pr_info.number}: {e}"
+                    f"Unexpected error closing {pr_info.repository_full_name}#{pr_info.number}: {e}"
                 )
 
             finally:

@@ -22,17 +22,17 @@ The error handling system provides:
 
 Dependamerge uses semantic exit codes for different failure types:
 
-| Code | Name                  | Description                           |
-|------|-----------------------|---------------------------------------|
-| 0    | SUCCESS               | Operation completed                   |
-| 1    | GENERAL_ERROR         | General operational failure           |
-| 2    | CONFIGURATION_ERROR   | Configuration validation failed       |
-| 3    | GITHUB_API_ERROR      | GitHub API access failed              |
-| 4    | NETWORK_ERROR         | Network connectivity issues           |
-| 5    | REPOSITORY_ERROR      | Git repository operation failed       |
-| 6    | PR_STATE_ERROR        | Pull request in invalid state        |
-| 7    | MERGE_ERROR           | Pull request merge operation failed   |
-| 8    | VALIDATION_ERROR      | Input validation failed               |
+| Code | Name                | Description                         |
+| ---- | ------------------- | ----------------------------------- |
+| 0    | SUCCESS             | Operation completed                 |
+| 1    | GENERAL_ERROR       | General operational failure         |
+| 2    | CONFIGURATION_ERROR | Configuration validation failed     |
+| 3    | GITHUB_API_ERROR    | GitHub API access failed            |
+| 4    | NETWORK_ERROR       | Network connectivity issues         |
+| 5    | REPOSITORY_ERROR    | Git repository operation failed     |
+| 6    | PR_STATE_ERROR      | Pull request in invalid state       |
+| 7    | MERGE_ERROR         | Pull request merge operation failed |
+| 8    | VALIDATION_ERROR    | Input validation failed             |
 
 ## Error Messages
 
