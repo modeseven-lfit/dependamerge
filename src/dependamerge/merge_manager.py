@@ -216,12 +216,11 @@ class AsyncMergeManager:
             if pr_info.state != "open":
                 result.status = MergeStatus.FAILED
                 result.error = "PR is already closed"
-                log_and_print(
-                    self.log,
-                    self._console,
-                    f"🛑 Failed: {pr_info.html_url} [already closed]",
-                    level="warning",
+                # Log warning separately to avoid duplicate console output
+                self.log.warning(
+                    f"PR {pr_info.repository_full_name}#{pr_info.number} is already closed"
                 )
+                self._console.print(f"🛑 Failed: {pr_info.html_url} [already closed]")
                 return result
 
             if not self._is_pr_mergeable(pr_info):
@@ -310,7 +309,7 @@ class AsyncMergeManager:
                         self.log,
                         self._console,
                         f"⏭️ Skipped: {pr_info.html_url} [has reviews requesting changes]",
-                        level="info",
+                        level="debug",
                     )
                     return result
                 else:
@@ -332,7 +331,7 @@ class AsyncMergeManager:
                     self.log,
                     self._console,
                     f"⏭️ Skipped: {pr_info.html_url} [{merge_check_reason.lower()}]",
-                    level="info",
+                    level="debug",
                 )
                 return result
 
@@ -362,11 +361,12 @@ class AsyncMergeManager:
             if not copilot_processing_successful:
                 result.status = MergeStatus.FAILED
                 result.error = "Copilot review processing incomplete - not approving to avoid pollution"
-                log_and_print(
-                    self.log,
-                    self._console,
-                    f"❌ Failed: {pr_info.html_url} [copilot processing incomplete]",
-                    level="error",
+                # Log error separately to avoid duplicate console output
+                self.log.error(
+                    f"Failed to process PR {pr_info.repository_full_name}#{pr_info.number}: Copilot review processing incomplete"
+                )
+                self._console.print(
+                    f"❌ Failed: {pr_info.html_url} [copilot processing incomplete]"
                 )
                 return result
 
@@ -505,11 +505,12 @@ class AsyncMergeManager:
 
                         if self.progress_tracker:
                             self.progress_tracker.merge_failure()
-                        log_and_print(
-                            self.log,
-                            self._console,
-                            f"❌ Failed: {pr_info.html_url} [rebase error: {e}]",
-                            level="error",
+                        # Log error separately to avoid duplicate console output
+                        self.log.error(
+                            f"Failed to rebase PR {pr_info.repository_full_name}#{pr_info.number}: {e}"
+                        )
+                        self._console.print(
+                            f"❌ Failed: {pr_info.html_url} [rebase error: {e}]"
                         )
                         return result
 
@@ -559,7 +560,7 @@ class AsyncMergeManager:
                         self.log,
                         self._console,
                         f"☑️ Approve/merge: {pr_info.html_url}",
-                        level="info",
+                        level="debug",
                     )
             else:
                 if self.progress_tracker:
@@ -578,7 +579,7 @@ class AsyncMergeManager:
                         self.log,
                         self._console,
                         f"✅ Merged: {pr_info.html_url}",
-                        level="info",
+                        level="debug",
                     )
                 else:
                     result.status = MergeStatus.FAILED
@@ -587,11 +588,12 @@ class AsyncMergeManager:
                         self.progress_tracker.merge_failure()
                     # Single line summary for failed merge with reason
                     failure_reason = self._get_failure_summary(pr_info)
-                    log_and_print(
-                        self.log,
-                        self._console,
-                        f"❌ Failed: {pr_info.html_url} [{failure_reason}]",
-                        level="error",
+                    # Log error separately to avoid duplicate console output
+                    self.log.error(
+                        f"Failed to merge PR {pr_info.repository_full_name}#{pr_info.number}: {failure_reason}"
+                    )
+                    self._console.print(
+                        f"❌ Failed: {pr_info.html_url} [{failure_reason}]"
                     )
 
         except GitHubPermissionError as e:
@@ -603,11 +605,12 @@ class AsyncMergeManager:
 
             # Extract operation-specific error message
             operation_desc = e.operation.replace("_", " ")
-            log_and_print(
-                self.log,
-                self._console,
-                f"❌ Failed: {pr_info.html_url} [permission denied: {operation_desc}]",
-                level="error",
+            # Log error separately to avoid duplicate console output
+            self.log.error(
+                f"Failed to process PR {pr_info.repository_full_name}#{pr_info.number}: Permission denied for {operation_desc}"
+            )
+            self._console.print(
+                f"❌ Failed: {pr_info.html_url} [permission denied: {operation_desc}]"
             )
 
             # Provide token-specific guidance
@@ -639,16 +642,11 @@ class AsyncMergeManager:
                 self.progress_tracker.merge_failure()
 
             # Provide clean single-line error messages for other errors
-            log_and_print(
-                self.log,
-                self._console,
-                f"❌ Failed: {pr_info.html_url} [processing error]",
-                level="error",
-            )
-
+            # Log error separately to avoid duplicate console output
             self.log.error(
-                f"Error processing PR {pr_info.repository_full_name}#{pr_info.number}: {e}"
+                f"Failed to process PR {pr_info.repository_full_name}#{pr_info.number}: {e}"
             )
+            self._console.print(f"❌ Failed: {pr_info.html_url} [processing error]")
 
         finally:
             result.duration = time.time() - start_time
