@@ -367,6 +367,61 @@ def merge(
             source_pr, "", github_client, progress_tracker=progress_tracker
         )
 
+        # Stop progress tracker before permissions check to avoid Rich display interference
+        if progress_tracker:
+            progress_tracker.stop()
+
+        # Pre-flight permission check (for all modes, to fail fast before expensive org scan)
+        console.print("\n🔍 Checking token permissions...")
+
+        # Check permissions on the source repository
+        async def _check_permissions():
+            async with GitHubAsync(token=token) as client:
+                operations = ["approve", "merge"]
+                if not no_fix:
+                    operations.append("update_branch")
+                return await client.check_token_permissions(
+                    operations, owner, repo_name
+                )
+
+        try:
+            perm_results = asyncio.run(_check_permissions())
+
+            # Check if any required permissions are missing
+            missing_perms = [
+                op
+                for op, result in perm_results.items()
+                if not result["has_permission"]
+            ]
+
+            if missing_perms:
+                console.print("\n❌ Token Permission Check Failed:\n")
+                for op in missing_perms:
+                    result = perm_results[op]
+                    console.print(f"   • {op}: {result['error']}")
+                    if result.get("guidance"):
+                        console.print(
+                            f"     Classic: {result['guidance'].get('classic', 'N/A')}"
+                        )
+                        console.print(
+                            f"     Fine-grained: {result['guidance'].get('fine_grained', 'N/A')}"
+                        )
+                console.print("\n💡 Update your token permissions and try again.")
+                raise typer.Exit(code=3)
+
+            console.print("✅ Token has required permissions\n")
+        except GitHubPermissionError as e:
+            console.print(f"\n❌ Permission check failed: {e}")
+            raise typer.Exit(code=3) from e
+        except Exception as e:
+            # Don't fail on permission check errors, just warn
+            console.print(f"⚠️  Could not verify permissions: {e}")
+            console.print("   Continuing anyway...\n")
+
+        # Restart progress tracker after permissions check
+        if show_progress and progress_tracker:
+            progress_tracker.start()
+
         # Debug matching info for source PR
         if debug_matching:
             console.print("\n🔍 Debug Matching Information")
@@ -525,54 +580,6 @@ def merge(
         for target_pr, comparison in all_similar_prs:
             console.print(f"  • {target_pr.repository_full_name} #{target_pr.number}")
             console.print(f"    {_format_condensed_similarity(comparison)}")
-
-        # Pre-flight permission check (for non-confirm mode only, to fail fast)
-        if no_confirm and len(all_similar_prs) > 0:
-            console.print("\n🔍 Checking token permissions...")
-
-            # Check permissions on the source repository
-            async def _check_permissions():
-                async with GitHubAsync(token=token) as client:
-                    operations = ["approve", "merge"]
-                    if not no_fix:
-                        operations.append("update_branch")
-                    return await client.check_token_permissions(
-                        operations, owner, repo_name
-                    )
-
-            try:
-                perm_results = asyncio.run(_check_permissions())
-
-                # Check if any required permissions are missing
-                missing_perms = [
-                    op
-                    for op, result in perm_results.items()
-                    if not result["has_permission"]
-                ]
-
-                if missing_perms:
-                    console.print("\n❌ Token Permission Check Failed:\n")
-                    for op in missing_perms:
-                        result = perm_results[op]
-                        console.print(f"   • {op}: {result['error']}")
-                        if result.get("guidance"):
-                            console.print(
-                                f"     Classic: {result['guidance'].get('classic', 'N/A')}"
-                            )
-                            console.print(
-                                f"     Fine-grained: {result['guidance'].get('fine_grained', 'N/A')}"
-                            )
-                    console.print("\n💡 Update your token permissions and try again.")
-                    raise typer.Exit(code=3)
-
-                console.print("✅ Token has required permissions\n")
-            except GitHubPermissionError as e:
-                console.print(f"\n❌ Permission check failed: {e}")
-                raise typer.Exit(code=3) from e
-            except Exception as e:
-                # Don't fail on permission check errors, just warn
-                console.print(f"⚠️  Could not verify permissions: {e}")
-                console.print("   Continuing anyway...\n")
 
         if not no_confirm:
             # IMPORTANT: Each PR must produce exactly ONE line of output in this section
