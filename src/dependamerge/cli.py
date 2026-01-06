@@ -716,8 +716,6 @@ def merge(
                     return  # Exit after handling preview continuation
                 else:
                     console.print("\n💡 No PRs are mergeable at this time.")
-            else:
-                console.print(f"\n✅ Success {merged_count}/{total_to_merge} PRs")
 
             if failed_count > 0:
                 if not no_confirm:
