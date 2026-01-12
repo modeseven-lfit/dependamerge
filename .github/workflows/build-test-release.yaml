@@ -39,7 +39,8 @@ jobs:
         uses: lfreleng-actions/repository-metadata-action@ceabcd987d13d7bfefd2372e01eebb0ddac45956  # v0.2.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          generate_summary: 'false'
+          github_summary: 'true'
+          gerrit_summary: 'false'
           artifact_upload: 'true'
           artifact_formats: 'json'
 
