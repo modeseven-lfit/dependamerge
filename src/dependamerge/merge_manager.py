@@ -622,18 +622,18 @@ class AsyncMergeManager:
 
             # Just log internally, don't show verbose messages
             skip_msg = f"{icon}  {action} unmergeable PR {pr_info.number} in {pr_info.repository_full_name} (mergeable: {pr_info.mergeable}, state: {pr_info.mergeable_state})"
-            self.log.info(skip_msg)
+            self.log.debug(skip_msg)
             return False
         elif pr_info.mergeable is None:
             # Handle UNKNOWN mergeable state - treat as potentially mergeable
             # GitHub is still calculating mergeable state, but we can attempt merge
-            self.log.info(
+            self.log.debug(
                 f"ℹ️ PR {pr_info.number} in {pr_info.repository_full_name} has unknown mergeable state - treating as potentially mergeable"
             )
             return True
 
         # All other cases are considered mergeable
-        self.log.info(
+        self.log.debug(
             f"✅ PR {pr_info.number} in {pr_info.repository_full_name} is considered mergeable (mergeable: {pr_info.mergeable}, state: {pr_info.mergeable_state})"
         )
         return True
@@ -1148,7 +1148,7 @@ class AsyncMergeManager:
             )
 
             if merge_method != self.default_merge_method:
-                self.log.info(
+                self.log.debug(
                     f"Repository {owner}/{repo} requires '{merge_method}' merge method "
                     f"(protection: requiresLinearHistory={protection_settings and protection_settings.get('requiresLinearHistory', False)})"
                 )
