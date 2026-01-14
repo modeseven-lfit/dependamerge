@@ -69,10 +69,11 @@ jobs:
       - name: 'Verify pushed tag'
         id: 'tag-validate'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/tag-validate-action@fix-ssh-signature-detection  # Testing
+        uses: lfreleng-actions/tag-validate-action@main  # Testing
         with:
           require_type: 'semver'
           require_signed: 'true'
+          require_github: 'true'
           token: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: 'Reject development tags'
