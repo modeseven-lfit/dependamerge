@@ -73,9 +73,9 @@ jobs:
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
           require_type: 'semver'
-          require_signed: 'true'
           require_github: 'true'
           debug: 'true'
+          require_signed: 'ssh,gpg-unverifiable'  # Cannot verify GPG without key
           use_local_action: 'true'  # Testing
 
       - name: 'Reject development tags'
