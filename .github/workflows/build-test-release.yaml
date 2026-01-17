@@ -71,11 +71,12 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: modeseven-lfreleng-actions/tag-validate-action@update-action  # Testing
         with:
+          token: "${{ secrets.GITHUB_TOKEN }}"
           require_type: 'semver'
           require_signed: 'true'
           require_github: 'true'
           debug: 'true'
-          token: "${{ secrets.GITHUB_TOKEN }}"
+          use_local_action: 'true'  # Testing
 
       - name: 'Reject development tags'
         if: steps.tag-validate.outputs.development_tag == 'true'
