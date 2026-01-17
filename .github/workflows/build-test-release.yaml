@@ -74,6 +74,7 @@ jobs:
           require_type: 'semver'
           require_signed: 'true'
           require_github: 'true'
+          debug: 'true'
           token: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: 'Reject development tags'
