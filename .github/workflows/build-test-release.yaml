@@ -232,6 +232,9 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@62b74fb7bb810d2c45b1865f47a77655621862a5  # v7.2.3
         id: grype-sarif
+        # The first Grype audit should not be blocking and should never fail
+        # That way we always get the required artefact; the second job will
+        # exit with an error, as required (below)
         continue-on-error: true
         with:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
