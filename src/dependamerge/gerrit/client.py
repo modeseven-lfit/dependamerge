@@ -27,11 +27,10 @@ import os
 import random
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Final
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 log = logging.getLogger("dependamerge.gerrit.client")
 
@@ -432,7 +431,7 @@ class GerritRestClient:
             headers["Authorization"] = f"Basic {token}"
 
         # Validate URL scheme
-        scheme = urllib.parse.urlparse(url).scheme
+        scheme = urlparse(url).scheme
         if scheme not in ("http", "https"):
             raise GerritRestError(f"Unsupported URL scheme: {scheme}")
 
@@ -461,8 +460,8 @@ class GerritRestClient:
             body = ""
             try:
                 body = http_exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Failed to read HTTP error response body: %s", exc)
 
             if status == 401:
                 raise GerritAuthError(

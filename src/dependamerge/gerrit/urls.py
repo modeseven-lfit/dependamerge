@@ -20,10 +20,9 @@ from __future__ import annotations
 import logging
 import os
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 log = logging.getLogger("dependamerge.gerrit.urls")
 
@@ -174,7 +173,7 @@ def _extract_base_path(
     host: str, location: str, known_endpoints: set[str]
 ) -> str:
     """Extract the base path from a redirect Location header."""
-    parsed = urllib.parse.urlparse(location)
+    parsed = urlparse(location)
 
     # Get the path component
     path = parsed.path if parsed.scheme or parsed.netloc else location
@@ -325,7 +324,7 @@ class GerritUrlBuilder:
         params: list[str] = []
 
         if query:
-            params.append(f"q={urllib.parse.quote(query, safe='')}")
+            params.append(f"q={quote(query, safe='')}")
         if options:
             for opt in options:
                 params.append(f"o={opt}")

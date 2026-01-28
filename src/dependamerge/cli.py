@@ -30,12 +30,9 @@ from .error_codes import (
 )
 from .gerrit import (
     GerritAuthError,
-    GerritChangeComparator,
     GerritChangeInfo,
     GerritComparisonResult,
     GerritRestError,
-    GerritService,
-    GerritSubmitManager,
     create_gerrit_comparator,
     create_gerrit_service,
     create_submit_manager,
@@ -58,7 +55,7 @@ from .pr_comparator import PRComparator
 from .progress_tracker import MergeProgressTracker, ProgressTracker
 from .resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
 from .system_utils import get_default_workers
-from .url_parser import ChangeSource, ParsedUrl, UrlParseError, parse_change_url
+from .url_parser import ParsedUrl, UrlParseError, parse_change_url
 
 # Constants
 MAX_RETRIES = 2
@@ -298,8 +295,6 @@ def _handle_gerrit_merge(
         verbose: Enable verbose output.
         console: Rich console for output.
     """
-    import os
-
     # Get Gerrit credentials from environment
     gerrit_username = os.getenv("GERRIT_USERNAME")
     gerrit_password = os.getenv("GERRIT_PASSWORD")
