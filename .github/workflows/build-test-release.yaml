@@ -69,20 +69,14 @@ jobs:
       - name: 'Verify pushed tag'
         id: 'tag-validate'
         # yamllint disable-line rule:line-length
-        uses: modeseven-lfreleng-actions/tag-validate-action@update-action  # Testing
-        # yamllint disable-line rule:line-length
-        # uses: lfreleng-actions/tag-validate-action@57c522eff7b5ff797094c054a9614f45e0c5ef17  # v0.3.0
+        uses: lfreleng-actions/tag-validate-action@57c522eff7b5ff797094c054a9614f45e0c5ef17  # v0.3.0
         with:
-          use_local_action: true  # Testing on development branch
           token: "${{ secrets.GITHUB_TOKEN }}"
           require_type: 'semver'
           reject_development: 'true'
           require_github: 'true'
           # yamllint disable-line rule:line-length
           require_signed: 'ssh,gpg-unverifiable'  # Cannot verify GPG without key
-          require_gerrit: 'gerrit.onap.org'
-          gerrit_username: ${{ secrets.GERRIT_USERNAME }}
-          gerrit_password: "${{ secrets.GERRIT_PASSWORD }}"
 
       - name: 'Ensure draft release exists'
         id: 'ensure-release'
