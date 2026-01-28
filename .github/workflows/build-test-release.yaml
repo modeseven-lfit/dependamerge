@@ -76,19 +76,14 @@ jobs:
           use_local_action: true  # Testing on development branch
           token: "${{ secrets.GITHUB_TOKEN }}"
           require_type: 'semver'
+          reject_development: 'true'
           require_github: 'true'
           # yamllint disable-line rule:line-length
           require_signed: 'ssh,gpg-unverifiable'  # Cannot verify GPG without key
-
-      - name: 'Reject development tags'
-        if: steps.tag-validate.outputs.development_tag == 'true'
-        shell: bash
-        run: |
-          # Reject development tags
-          echo "Development tag pushed; aborting release workflow 🛑"
-          echo "Development tag pushed; aborting release workflow 🛑" \
-            >> "$GITHUB_STEP_SUMMARY"
-          exit 1
+          require_gerrit: 'gerrit.onap.org'
+          gerrit_username: "modesevenindustrialsolutions"
+          gerrit_password: "bad-password"
+          # gerrit_password: "${{ secrets.GERRIT_PASSWORD }}"
 
       - name: 'Ensure draft release exists'
         id: 'ensure-release'
