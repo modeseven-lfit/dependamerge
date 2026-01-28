@@ -81,9 +81,8 @@ jobs:
           # yamllint disable-line rule:line-length
           require_signed: 'ssh,gpg-unverifiable'  # Cannot verify GPG without key
           require_gerrit: 'gerrit.onap.org'
-          gerrit_username: "modesevenindustrialsolutions"
-          gerrit_password: "bad-password"
-          # gerrit_password: "${{ secrets.GERRIT_PASSWORD }}"
+          gerrit_username: ${{ secrets.GERRIT_USERNAME }}
+          gerrit_password: "${{ secrets.GERRIT_PASSWORD }}"
 
       - name: 'Ensure draft release exists'
         id: 'ensure-release'
