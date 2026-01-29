@@ -24,10 +24,13 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 
 from pygerrit2 import GerritRestAPI
 from pygerrit2 import HTTPBasicAuth
+
+from dependamerge.netrc import get_credentials_for_host, NetrcParseError
 from requests.exceptions import RequestException
 
 log = logging.getLogger("dependamerge.gerrit.client")
@@ -432,22 +435,30 @@ def build_client(
     max_attempts: int = 5,
     username: str | None = None,
     password: str | None = None,
+    use_netrc: bool = True,
+    netrc_file: Path | None = None,
 ) -> GerritRestClient:
     """
     Build a GerritRestClient for a given host.
 
     This factory function constructs the appropriate base URL and reads
-    authentication credentials from arguments or environment variables.
+    authentication credentials from multiple sources in priority order.
+
+    Credential resolution order:
+    1. Explicit username/password arguments
+    2. .netrc file (if use_netrc=True)
+    3. Environment variables: GERRIT_USERNAME/GERRIT_PASSWORD or
+       GERRIT_HTTP_USER/GERRIT_HTTP_PASSWORD
 
     Args:
         host: Gerrit hostname (without scheme).
         base_path: Optional base path (e.g., "infra"). If None, no base path.
         timeout: Request timeout in seconds.
         max_attempts: Maximum retry attempts for transient failures.
-        username: HTTP username. Falls back to GERRIT_USERNAME or
-                  GERRIT_HTTP_USER environment variables.
-        password: HTTP password. Falls back to GERRIT_PASSWORD or
-                  GERRIT_HTTP_PASSWORD environment variables.
+        username: HTTP username. Takes priority over netrc and env vars.
+        password: HTTP password. Takes priority over netrc and env vars.
+        use_netrc: Whether to try .netrc for credentials (default: True).
+        netrc_file: Explicit path to a .netrc file (optional).
 
     Returns:
         A configured GerritRestClient instance.
@@ -458,17 +469,39 @@ def build_client(
     else:
         base_url = f"https://{host}/"
 
-    # Resolve authentication from arguments or environment
-    user = (
-        (username or "").strip()
-        or os.getenv("GERRIT_USERNAME", "").strip()
-        or os.getenv("GERRIT_HTTP_USER", "").strip()
-    )
-    passwd = (
-        (password or "").strip()
-        or os.getenv("GERRIT_PASSWORD", "").strip()
-        or os.getenv("GERRIT_HTTP_PASSWORD", "").strip()
-    )
+    # Start with explicit credentials if provided
+    user = (username or "").strip()
+    passwd = (password or "").strip()
+
+    # Try .netrc if explicit credentials not provided
+    if (not user or not passwd) and use_netrc:
+        try:
+            netrc_creds = get_credentials_for_host(
+                host=host,
+                netrc_file=netrc_file,
+                use_netrc=True,
+                netrc_optional=True,
+            )
+            if netrc_creds:
+                if not user:
+                    user = netrc_creds.login
+                if not passwd:
+                    passwd = netrc_creds.password
+                log.debug("Using credentials from .netrc for %s", host)
+        except NetrcParseError as e:
+            log.warning("Error parsing .netrc file: %s", e)
+
+    # Fall back to environment variables
+    if not user:
+        user = (
+            os.getenv("GERRIT_USERNAME", "").strip()
+            or os.getenv("GERRIT_HTTP_USER", "").strip()
+        )
+    if not passwd:
+        passwd = (
+            os.getenv("GERRIT_PASSWORD", "").strip()
+            or os.getenv("GERRIT_HTTP_PASSWORD", "").strip()
+        )
 
     auth: tuple[str, str] | None = None
     if user and passwd:

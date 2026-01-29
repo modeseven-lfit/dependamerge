@@ -577,6 +577,135 @@ class TestBuildClient:
         assert client.is_authenticated is True
         mock_auth.assert_called_once_with("explicit", "credentials")
 
+    @patch("dependamerge.gerrit.client.GerritRestAPI")
+    @patch("dependamerge.gerrit.client.HTTPBasicAuth")
+    @patch("dependamerge.gerrit.client.get_credentials_for_host")
+    def test_build_client_from_netrc(
+        self, mock_get_creds, mock_auth, mock_api, monkeypatch
+    ):
+        """Test building client with credentials from .netrc file."""
+        # Clear environment variables
+        monkeypatch.delenv("GERRIT_USERNAME", raising=False)
+        monkeypatch.delenv("GERRIT_PASSWORD", raising=False)
+        monkeypatch.delenv("GERRIT_HTTP_USER", raising=False)
+        monkeypatch.delenv("GERRIT_HTTP_PASSWORD", raising=False)
+
+        # Mock netrc credentials
+        from dependamerge.netrc import NetrcCredentials
+
+        mock_get_creds.return_value = NetrcCredentials(
+            machine="gerrit.example.org",
+            login="netrcuser",
+            password="netrcpass",
+        )
+
+        client = build_client("gerrit.example.org")
+
+        assert client.is_authenticated is True
+        mock_auth.assert_called_once_with("netrcuser", "netrcpass")
+        mock_get_creds.assert_called_once()
+
+    @patch("dependamerge.gerrit.client.GerritRestAPI")
+    @patch("dependamerge.gerrit.client.HTTPBasicAuth")
+    @patch("dependamerge.gerrit.client.get_credentials_for_host")
+    def test_build_client_explicit_overrides_netrc(
+        self, mock_get_creds, mock_auth, mock_api, monkeypatch
+    ):
+        """Test that explicit credentials override netrc."""
+        # Clear environment variables
+        monkeypatch.delenv("GERRIT_USERNAME", raising=False)
+        monkeypatch.delenv("GERRIT_PASSWORD", raising=False)
+
+        # Mock netrc credentials (should not be used)
+        from dependamerge.netrc import NetrcCredentials
+
+        mock_get_creds.return_value = NetrcCredentials(
+            machine="gerrit.example.org",
+            login="netrcuser",
+            password="netrcpass",
+        )
+
+        client = build_client(
+            "gerrit.example.org",
+            username="explicit",
+            password="credentials",
+        )
+
+        assert client.is_authenticated is True
+        mock_auth.assert_called_once_with("explicit", "credentials")
+        # netrc should not be queried when explicit creds provided
+        mock_get_creds.assert_not_called()
+
+    @patch("dependamerge.gerrit.client.GerritRestAPI")
+    @patch("dependamerge.gerrit.client.HTTPBasicAuth")
+    @patch("dependamerge.gerrit.client.get_credentials_for_host")
+    def test_build_client_netrc_overrides_env(
+        self, mock_get_creds, mock_auth, mock_api, monkeypatch
+    ):
+        """Test that netrc credentials take priority over environment."""
+        monkeypatch.setenv("GERRIT_USERNAME", "envuser")
+        monkeypatch.setenv("GERRIT_PASSWORD", "envpass")
+
+        # Mock netrc credentials
+        from dependamerge.netrc import NetrcCredentials
+
+        mock_get_creds.return_value = NetrcCredentials(
+            machine="gerrit.example.org",
+            login="netrcuser",
+            password="netrcpass",
+        )
+
+        client = build_client("gerrit.example.org")
+
+        assert client.is_authenticated is True
+        # netrc should take priority
+        mock_auth.assert_called_once_with("netrcuser", "netrcpass")
+
+    @patch("dependamerge.gerrit.client.GerritRestAPI")
+    @patch("dependamerge.gerrit.client.get_credentials_for_host")
+    def test_build_client_use_netrc_false(self, mock_get_creds, mock_api, monkeypatch):
+        """Test that use_netrc=False skips netrc lookup."""
+        # Clear environment variables
+        monkeypatch.delenv("GERRIT_USERNAME", raising=False)
+        monkeypatch.delenv("GERRIT_PASSWORD", raising=False)
+
+        client = build_client("gerrit.example.org", use_netrc=False)
+
+        assert client.is_authenticated is False
+        mock_get_creds.assert_not_called()
+
+    @patch("dependamerge.gerrit.client.GerritRestAPI")
+    @patch("dependamerge.gerrit.client.HTTPBasicAuth")
+    @patch("dependamerge.gerrit.client.get_credentials_for_host")
+    def test_build_client_netrc_with_explicit_file(
+        self, mock_get_creds, mock_auth, mock_api, monkeypatch, tmp_path
+    ):
+        """Test that netrc_file parameter is passed correctly."""
+        # Clear environment variables
+        monkeypatch.delenv("GERRIT_USERNAME", raising=False)
+        monkeypatch.delenv("GERRIT_PASSWORD", raising=False)
+
+        # Create a dummy netrc file path
+        netrc_path = tmp_path / ".netrc"
+        netrc_path.write_text("machine gerrit.example.org login user password pass")
+
+        # Mock netrc credentials
+        from dependamerge.netrc import NetrcCredentials
+
+        mock_get_creds.return_value = NetrcCredentials(
+            machine="gerrit.example.org",
+            login="fileuser",
+            password="filepass",
+        )
+
+        client = build_client("gerrit.example.org", netrc_file=netrc_path)
+
+        assert client.is_authenticated is True
+        mock_auth.assert_called_once_with("fileuser", "filepass")
+        # Verify netrc_file was passed
+        call_kwargs = mock_get_creds.call_args[1]
+        assert call_kwargs.get("netrc_file") == netrc_path
+
 
 class TestPygerrit2Integration:
     """Tests for pygerrit2 integration."""

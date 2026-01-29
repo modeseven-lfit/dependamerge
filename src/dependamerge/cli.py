@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import sys
+from pathlib import Path
 
 import requests
 import typer
@@ -53,6 +54,10 @@ from .merge_manager import AsyncMergeManager
 from .models import PullRequestInfo
 from .pr_comparator import PRComparator
 from .progress_tracker import MergeProgressTracker, ProgressTracker
+from .netrc import (
+    NetrcParseError,
+    resolve_gerrit_credentials,
+)
 from .resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
 from .system_utils import get_default_workers
 from .url_parser import ParsedUrl, UrlParseError, parse_change_url
@@ -208,8 +213,16 @@ def _display_change_info(
     change: GerritChangeInfo,
     title: str = "",
     console: Console = console,
+    auth_method: str | None = None,
 ) -> None:
-    """Display Gerrit change information in a formatted table."""
+    """Display Gerrit change information in a formatted table.
+
+    Args:
+        change: The Gerrit change info to display.
+        title: Optional title for the table.
+        console: Rich console for output.
+        auth_method: Description of authentication method used (e.g., ".netrc file").
+    """
 
     table = Table(title=title if title else None)
     table.add_column("Property", style="cyan")
@@ -241,6 +254,8 @@ def _display_change_info(
         table.add_row("Files Changed", str(len(change.files_changed)))
     if change.url:
         table.add_row("URL", change.url)
+    if auth_method:
+        table.add_row("Auth Method", auth_method)
 
     console.print(table)
 
@@ -284,6 +299,9 @@ def _handle_gerrit_merge(
     similarity_threshold: float,
     verbose: bool,
     console: Console,
+    no_netrc: bool = False,
+    netrc_file: Path | None = None,
+    netrc_optional: bool = True,
 ) -> None:
     """
     Handle merge operation for a Gerrit change URL.
@@ -294,16 +312,31 @@ def _handle_gerrit_merge(
         similarity_threshold: Threshold for matching similar changes.
         verbose: Enable verbose output.
         console: Rich console for output.
+        no_netrc: If True, skip .netrc credential lookup.
+        netrc_file: Explicit path to a .netrc file.
+        netrc_optional: If True, don't fail if netrc not found.
     """
-    # Get Gerrit credentials from environment
-    gerrit_username = os.getenv("GERRIT_USERNAME")
-    gerrit_password = os.getenv("GERRIT_PASSWORD")
+    # Resolve Gerrit credentials from all sources using centralized function
+    try:
+        credentials = resolve_gerrit_credentials(
+            host=parsed_url.host,
+            use_netrc=not no_netrc,
+            netrc_file=netrc_file,
+        )
+    except NetrcParseError as e:
+        console.print(f"⚠️  Error parsing .netrc file: {e}")
+        credentials = None
 
-    if not gerrit_username or not gerrit_password:
-        console.print("❌ Gerrit credentials not found in environment.")
-        console.print("   Set GERRIT_USERNAME and GERRIT_PASSWORD environment variables.")
+    if credentials is None or not credentials.is_valid:
+        console.print("❌ Gerrit credentials not found.")
+        console.print("   Options:")
+        console.print("   1. Create a ~/.netrc file with Gerrit credentials")
+        console.print("   2. Set GERRIT_USERNAME and GERRIT_PASSWORD environment variables")
         console.print("   Tip: Source your .secrets.gerrit file and run use_lf or use_onap")
         raise typer.Exit(1)
+
+    if verbose:
+        console.print(f"🔑 Using credentials from {credentials.auth_method_display()}")
 
     console.print(f"🔍 Examining Gerrit change on {parsed_url.host}...")
 
@@ -312,8 +345,8 @@ def _handle_gerrit_merge(
         service = create_gerrit_service(
             host=parsed_url.host,
             base_path=parsed_url.base_path,
-            username=gerrit_username,
-            password=gerrit_password,
+            username=credentials.username,
+            password=credentials.password,
         )
 
         if not service.is_authenticated:
@@ -328,7 +361,11 @@ def _handle_gerrit_merge(
             raise typer.Exit(1)
 
         # Display source change info using Rich table (same style as GitHub)
-        _display_change_info(source_change, console=console)
+        _display_change_info(
+            source_change,
+            console=console,
+            auth_method=credentials.auth_method_display(),
+        )
 
         if source_change.status == "MERGED":
             console.print("\n✅ Change is already merged.")
@@ -347,7 +384,11 @@ def _handle_gerrit_merge(
                 console.print("✅ Rebase successful! Refreshing change info...")
                 # Refresh the change info after successful rebase
                 source_change = service.get_change_info(parsed_url.change_number)
-                _display_change_info(source_change, console=console)
+                _display_change_info(
+                    source_change,
+                    console=console,
+                    auth_method=credentials.auth_method_display(),
+                )
             elif rebase_result["conflict"]:
                 console.print("\n❌ Rebase failed due to merge conflicts:")
                 if rebase_result["conflicting_files"]:
@@ -385,9 +426,26 @@ def _handle_gerrit_merge(
             similar_changes + [(source_change, None)]
         )
 
+        # Check permissions on the source change before proceeding
+        # Permissions are per-project in Gerrit, so we check the source change
+        # and warn if the user may not have sufficient permissions
+        permission_warnings = source_change.get_permission_warnings()
+        if permission_warnings:
+            console.print("\n⚠️  Permission warnings:")
+            for warning in permission_warnings:
+                console.print(f"   • {warning}")
+            console.print(
+                "\n   Note: Permissions vary by project. The operation may still "
+                "succeed on some changes."
+            )
+
         if not no_confirm:
-            # Preview mode
+            # Preview mode - show permission status
             console.print(f"\n📊 Preview: {len(all_changes)} changes would be reviewed and submitted")
+            if source_change.has_required_permissions():
+                console.print("   ✅ You appear to have required permissions (+2 Code-Review, submit)")
+            else:
+                console.print("   ⚠️  You may not have all required permissions (see warnings above)")
             console.print("\nTo proceed, run with --no-confirm flag")
             return
 
@@ -397,8 +455,8 @@ def _handle_gerrit_merge(
         submit_manager = create_submit_manager(
             host=parsed_url.host,
             base_path=parsed_url.base_path,
-            username=gerrit_username,
-            password=gerrit_password,
+            username=credentials.username,
+            password=credentials.password,
         )
 
         # Pass the tuples directly (submit_changes expects list of tuples)
@@ -488,6 +546,26 @@ def merge(
         "-v",
         help="Enable verbose debug logging",
     ),
+    no_netrc: bool = typer.Option(
+        False,
+        "--no-netrc",
+        help="Disable .netrc credential lookup for Gerrit authentication",
+    ),
+    netrc_file: Path | None = typer.Option(
+        None,
+        "--netrc-file",
+        help="Explicit path to .netrc file for Gerrit credentials",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    netrc_optional: bool = typer.Option(
+        True,
+        "--netrc-optional/--netrc-required",
+        help="Whether to fail if .netrc file is not found (default: optional)",
+    ),
 ):
     """
     Bulk approve/merge pull requests or Gerrit changes.
@@ -525,9 +603,13 @@ def merge(
     - protection-rules: Bypass branch protection checks (requires permissions)
     - all: Attempt merge despite most warnings (not recommended)
 
-    Environment Variables (Gerrit):
-    - GERRIT_USERNAME: HTTP username for Gerrit authentication
-    - GERRIT_PASSWORD: HTTP password for Gerrit authentication
+    Authentication (Gerrit):
+    Credentials are loaded in this order:
+    1. .netrc file (if not disabled with --no-netrc)
+    2. Environment variables: GERRIT_USERNAME and GERRIT_PASSWORD
+
+    .netrc search order: ./netrc, ~/.netrc, ~/_netrc (Windows)
+    Use --netrc-file to specify an explicit path.
     """
     # Configure logging
     if verbose:
@@ -578,6 +660,9 @@ def merge(
                 similarity_threshold=similarity_threshold,
                 verbose=verbose,
                 console=console,
+                no_netrc=no_netrc,
+                netrc_file=netrc_file,
+                netrc_optional=netrc_optional,
             )
             return
 

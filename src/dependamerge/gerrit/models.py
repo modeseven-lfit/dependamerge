@@ -182,6 +182,16 @@ class GerritChangeInfo(BaseModel):
         True, description="Whether all submit requirements are satisfied"
     )
 
+    # Permissions - for checking what the current user can do
+    permitted_labels: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Map of label names to permitted voting values for current user",
+    )
+    actions: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Available actions the caller can perform on the change",
+    )
+
     @classmethod
     def from_api_response(
         cls,
@@ -248,6 +258,12 @@ class GerritChangeInfo(BaseModel):
         mergeable = data.get("mergeable")
         work_in_progress = data.get("work_in_progress", False)
 
+        # Extract permitted labels (what the current user can vote on)
+        permitted_labels: dict[str, list[str]] = data.get("permitted_labels", {})
+
+        # Extract available actions
+        actions: dict[str, dict[str, Any]] = data.get("actions", {})
+
         # Check submit requirements (Gerrit 3.x+)
         submit_requirements_met = True
         submit_records = data.get("submit_records", [])
@@ -289,6 +305,8 @@ class GerritChangeInfo(BaseModel):
             created=created,
             updated=updated,
             submit_requirements_met=submit_requirements_met,
+            permitted_labels=permitted_labels,
+            actions=actions,
         )
 
     @property
@@ -357,6 +375,77 @@ class GerritChangeInfo(BaseModel):
             if label.name == label_name:
                 return label.approved
         return False
+
+    def can_vote_label(self, label_name: str, value: int) -> bool:
+        """
+        Check if the current user can vote a specific value on a label.
+
+        Args:
+            label_name: The label name (e.g., "Code-Review").
+            value: The vote value to check (e.g., 2 for +2).
+
+        Returns:
+            True if the user can vote this value on the label.
+        """
+        if label_name not in self.permitted_labels:
+            return False
+        permitted_values = self.permitted_labels[label_name]
+        # Values are strings like "-2", "-1", "0", "+1", "+2"
+        value_str = f"+{value}" if value > 0 else str(value)
+        return value_str in permitted_values
+
+    def can_code_review_plus_two(self) -> bool:
+        """
+        Check if the current user can give +2 Code-Review.
+
+        Returns:
+            True if the user can vote +2 on Code-Review.
+        """
+        return self.can_vote_label("Code-Review", 2)
+
+    def can_submit_action(self) -> bool:
+        """
+        Check if the current user has the submit action available.
+
+        This checks the actions field returned by Gerrit when
+        CURRENT_ACTIONS is requested.
+
+        Returns:
+            True if the submit action is available.
+        """
+        return "submit" in self.actions
+
+    def get_permission_warnings(self) -> list[str]:
+        """
+        Get a list of permission warnings for operations on this change.
+
+        Returns:
+            List of warning messages about missing permissions.
+        """
+        warnings = []
+
+        if not self.can_code_review_plus_two():
+            warnings.append(
+                "You may not have permission to give +2 Code-Review on this change"
+            )
+
+        if not self.can_submit_action():
+            warnings.append(
+                "You may not have permission to submit this change"
+            )
+
+        return warnings
+
+    def has_required_permissions(self) -> bool:
+        """
+        Check if the user has all required permissions for merge operations.
+
+        This checks both +2 Code-Review and submit permissions.
+
+        Returns:
+            True if the user has all required permissions.
+        """
+        return self.can_code_review_plus_two() and self.can_submit_action()
 
 
 class GerritComparisonResult(BaseModel):

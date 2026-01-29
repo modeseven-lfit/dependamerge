@@ -402,6 +402,41 @@ curl -u "$GERRIT_USERNAME:$GERRIT_PASSWORD" \
 A successful response returns your account details in JSON format (with a
 `)]}'\n` XSSI guard prefix that Gerrit adds to all JSON responses).
 
+#### Using .netrc Files
+
+Dependamerge supports loading Gerrit credentials from `.netrc` files, following
+the standard format used by curl and other tools.
+
+**Search order:**
+
+1. `.netrc` in the current directory
+2. `~/.netrc` in your home directory
+3. `~/_netrc` (Windows fallback)
+
+**Example `.netrc` file:**
+
+```text
+machine gerrit.onap.org login myuser password mytoken
+machine gerrit.opendaylight.org login myuser password anothertoken
+```
+
+**CLI options:**
+
+| Option | Description |
+| ------ | ----------- |
+| `--no-netrc` | Disable .netrc file lookup |
+| `--netrc-file PATH` | Use a specific .netrc file |
+| `--netrc-optional` | Do not fail if .netrc file is missing (default) |
+| `--netrc-required` | Require a .netrc file and fail if missing |
+
+By default, `.netrc` lookup is optional (`--netrc-optional`): if no `.netrc`
+file exists, the tool continues and falls back to environment variables.
+Use `--netrc-required` to enforce that a `.netrc` file must be present.
+
+When a `.netrc` file is present, the tool loads credentials automatically.
+Explicit environment variables or CLI arguments take precedence over `.netrc`
+entries.
+
 ## Usage
 
 ### Closing Pull Requests

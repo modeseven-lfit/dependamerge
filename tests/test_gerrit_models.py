@@ -678,3 +678,300 @@ class TestGerritSubmitResult:
         assert result.submitted is False
         assert result.error is None
         assert result.duration_seconds == 0.0
+
+
+class TestGerritChangeInfoPermissions:
+    """Tests for permission checking methods on GerritChangeInfo."""
+
+    def test_can_vote_label_with_positive_value(self):
+        """Test can_vote_label with positive vote values."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-2", "-1", "0", "+1", "+2"],
+                "Verified": ["-1", "0", "+1"],
+            },
+        )
+
+        assert change.can_vote_label("Code-Review", 2) is True
+        assert change.can_vote_label("Code-Review", 1) is True
+        assert change.can_vote_label("Verified", 1) is True
+        assert change.can_vote_label("Verified", 2) is False  # Can't give +2 Verified
+
+    def test_can_vote_label_with_negative_value(self):
+        """Test can_vote_label with negative vote values."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-2", "-1", "0", "+1", "+2"],
+            },
+        )
+
+        assert change.can_vote_label("Code-Review", -2) is True
+        assert change.can_vote_label("Code-Review", -1) is True
+
+    def test_can_vote_label_unknown_label(self):
+        """Test can_vote_label with unknown label."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-1", "0", "+1"],
+            },
+        )
+
+        assert change.can_vote_label("Unknown-Label", 1) is False
+
+    def test_can_vote_label_empty_permitted(self):
+        """Test can_vote_label with empty permitted_labels."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={},
+        )
+
+        assert change.can_vote_label("Code-Review", 2) is False
+
+    def test_can_code_review_plus_two_true(self):
+        """Test can_code_review_plus_two when user has +2 permission."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-2", "-1", "0", "+1", "+2"],
+            },
+        )
+
+        assert change.can_code_review_plus_two() is True
+
+    def test_can_code_review_plus_two_false(self):
+        """Test can_code_review_plus_two when user lacks +2 permission."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-1", "0", "+1"],  # Only +1 max
+            },
+        )
+
+        assert change.can_code_review_plus_two() is False
+
+    def test_can_submit_action_true(self):
+        """Test can_submit_action when submit is available."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            actions={
+                "submit": {"method": "POST", "label": "Submit"},
+                "rebase": {"method": "POST", "label": "Rebase"},
+            },
+        )
+
+        assert change.can_submit_action() is True
+
+    def test_can_submit_action_false(self):
+        """Test can_submit_action when submit is not available."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            actions={
+                "rebase": {"method": "POST", "label": "Rebase"},
+            },
+        )
+
+        assert change.can_submit_action() is False
+
+    def test_can_submit_action_empty_actions(self):
+        """Test can_submit_action with empty actions."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            actions={},
+        )
+
+        assert change.can_submit_action() is False
+
+    def test_get_permission_warnings_no_warnings(self):
+        """Test get_permission_warnings when user has all permissions."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-2", "-1", "0", "+1", "+2"],
+            },
+            actions={
+                "submit": {"method": "POST", "label": "Submit"},
+            },
+        )
+
+        warnings = change.get_permission_warnings()
+        assert warnings == []
+
+    def test_get_permission_warnings_no_code_review(self):
+        """Test get_permission_warnings when user lacks +2 Code-Review."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-1", "0", "+1"],
+            },
+            actions={
+                "submit": {"method": "POST", "label": "Submit"},
+            },
+        )
+
+        warnings = change.get_permission_warnings()
+        assert len(warnings) == 1
+        assert "+2 Code-Review" in warnings[0]
+
+    def test_get_permission_warnings_no_submit(self):
+        """Test get_permission_warnings when user lacks submit permission."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-2", "-1", "0", "+1", "+2"],
+            },
+            actions={},
+        )
+
+        warnings = change.get_permission_warnings()
+        assert len(warnings) == 1
+        assert "submit" in warnings[0]
+
+    def test_get_permission_warnings_both_missing(self):
+        """Test get_permission_warnings when user lacks both permissions."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={},
+            actions={},
+        )
+
+        warnings = change.get_permission_warnings()
+        assert len(warnings) == 2
+
+    def test_has_required_permissions_true(self):
+        """Test has_required_permissions when user has all permissions."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-2", "-1", "0", "+1", "+2"],
+            },
+            actions={
+                "submit": {"method": "POST", "label": "Submit"},
+            },
+        )
+
+        assert change.has_required_permissions() is True
+
+    def test_has_required_permissions_false_no_review(self):
+        """Test has_required_permissions when user lacks +2 Code-Review."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-1", "0", "+1"],
+            },
+            actions={
+                "submit": {"method": "POST", "label": "Submit"},
+            },
+        )
+
+        assert change.has_required_permissions() is False
+
+    def test_has_required_permissions_false_no_submit(self):
+        """Test has_required_permissions when user lacks submit."""
+        change = GerritChangeInfo(
+            number=1,
+            change_id="I123",
+            project="proj",
+            subject="Test",
+            owner="user",
+            branch="main",
+            status="NEW",
+            permitted_labels={
+                "Code-Review": ["-2", "-1", "0", "+1", "+2"],
+            },
+            actions={},
+        )
+
+        assert change.has_required_permissions() is False

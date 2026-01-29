@@ -748,3 +748,122 @@ class TestDefaultOptions:
         """Test default options for list queries."""
         assert "CURRENT_REVISION" in DEFAULT_LIST_OPTIONS
         assert "LABELS" in DEFAULT_LIST_OPTIONS
+
+
+class TestParseConflictFiles:
+    """Tests for _parse_conflict_files defensive parsing."""
+
+    def test_parse_conflict_files_standard_format(self, mock_client):
+        """Test parsing with standard Gerrit conflict response format."""
+        service = GerritService(host="gerrit.example.org")
+        service._client = mock_client
+
+        response_body = """The change could not be rebased due to a conflict during merge.
+
+merge conflict(s):
+path/to/file1.txt
+path/to/file2.txt"""
+
+        files = service._parse_conflict_files(response_body)
+        assert files == ["path/to/file1.txt", "path/to/file2.txt"]
+
+    def test_parse_conflict_files_empty_response(self, mock_client, caplog):
+        """Test parsing with empty response body."""
+        import logging
+
+        service = GerritService(host="gerrit.example.org")
+        service._client = mock_client
+
+        with caplog.at_level(logging.DEBUG, logger="dependamerge.gerrit.service"):
+            files = service._parse_conflict_files("")
+
+        assert files == []
+        # Filter to only look at records from the service module
+        service_records = [
+            r for r in caplog.records if r.name == "dependamerge.gerrit.service"
+        ]
+        # Should log at debug level about empty response
+        assert any("empty" in r.message.lower() for r in service_records)
+
+    def test_parse_conflict_files_no_marker(self, mock_client, caplog):
+        """Test parsing when merge conflict marker is missing."""
+        import logging
+
+        service = GerritService(host="gerrit.example.org")
+        service._client = mock_client
+
+        response_body = "Some unexpected error message without conflict marker"
+
+        with caplog.at_level(logging.WARNING):
+            files = service._parse_conflict_files(response_body)
+
+        assert files == []
+        assert "Failed to find 'merge conflict' marker" in caplog.text
+
+    def test_parse_conflict_files_marker_but_no_files(self, mock_client, caplog):
+        """Test parsing when marker exists but no files follow."""
+        import logging
+
+        service = GerritService(host="gerrit.example.org")
+        service._client = mock_client
+
+        response_body = """The change could not be rebased.
+
+merge conflict(s):
+
+"""
+
+        with caplog.at_level(logging.WARNING):
+            files = service._parse_conflict_files(response_body)
+
+        assert files == []
+        assert "No conflicting files parsed" in caplog.text
+
+    def test_parse_conflict_files_blank_line_ends_section(self, mock_client):
+        """Test that blank line after files ends the conflict section."""
+        service = GerritService(host="gerrit.example.org")
+        service._client = mock_client
+
+        response_body = """merge conflict(s):
+path/to/file1.txt
+path/to/file2.txt
+
+Some additional message that should not be included"""
+
+        files = service._parse_conflict_files(response_body)
+        assert files == ["path/to/file1.txt", "path/to/file2.txt"]
+        assert "Some additional message" not in files
+
+    def test_parse_conflict_files_case_insensitive_marker(self, mock_client):
+        """Test that marker matching is case-insensitive."""
+        service = GerritService(host="gerrit.example.org")
+        service._client = mock_client
+
+        response_body = """MERGE CONFLICT(S):
+path/to/file.txt"""
+
+        files = service._parse_conflict_files(response_body)
+        assert files == ["path/to/file.txt"]
+
+    def test_parse_conflict_files_strips_whitespace(self, mock_client):
+        """Test that file paths are stripped of whitespace."""
+        service = GerritService(host="gerrit.example.org")
+        service._client = mock_client
+
+        response_body = """merge conflict(s):
+  path/to/file1.txt
+    path/to/file2.txt"""
+
+        files = service._parse_conflict_files(response_body)
+        assert files == ["path/to/file1.txt", "path/to/file2.txt"]
+
+    def test_parse_conflict_files_single_file(self, mock_client):
+        """Test parsing with a single conflicting file."""
+        service = GerritService(host="gerrit.example.org")
+        service._client = mock_client
+
+        response_body = """merge conflict(s):
+only-one-file.txt"""
+
+        files = service._parse_conflict_files(response_body)
+        assert files == ["only-one-file.txt"]

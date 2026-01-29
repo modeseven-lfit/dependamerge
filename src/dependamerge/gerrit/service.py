@@ -44,6 +44,7 @@ DEFAULT_CHANGE_OPTIONS: list[str] = [
     "DETAILED_LABELS",
     "DETAILED_ACCOUNTS",
     "SUBMITTABLE",
+    "CURRENT_ACTIONS",  # Include available actions for permission checking
 ]
 
 # Default query options for listing changes
@@ -68,6 +69,9 @@ class GerritService:
     changes, and managing change operations across a Gerrit server.
     """
 
+    # Default similarity threshold for fallback comparison
+    DEFAULT_SIMILARITY_THRESHOLD: float = 0.8
+
     def __init__(
         self,
         host: str,
@@ -77,6 +81,7 @@ class GerritService:
         timeout: float = 15.0,
         max_attempts: int = 5,
         progress_tracker: ProgressTracker | None = None,
+        similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     ) -> None:
         """
         Initialize the Gerrit service.
@@ -89,10 +94,16 @@ class GerritService:
             timeout: Request timeout in seconds.
             max_attempts: Maximum retry attempts for transient failures.
             progress_tracker: Optional progress tracker for UI feedback.
+            similarity_threshold: Minimum confidence score (0.0 to 1.0) for
+                changes to be considered similar in the fallback comparison.
+                This is used by _basic_compare when no external comparator
+                is provided. Should match the threshold used by
+                GerritChangeComparator for consistent behavior.
         """
         self.host = host
         self.base_path = base_path
         self._progress_tracker = progress_tracker
+        self._similarity_threshold = similarity_threshold
 
         # Build URL helper
         self._url_builder = create_url_builder(
@@ -302,23 +313,54 @@ class GerritService:
         merge conflict(s):
         path/to/file1.txt
         path/to/file2.txt"
+
+        Returns:
+            List of conflicting file paths. May be empty if parsing fails
+            or the response format is unexpected.
         """
         files: list[str] = []
         if not response_body:
+            # Nothing to parse; log at debug level to aid diagnostics without being noisy.
+            log.debug(
+                "Gerrit conflict response body is empty when parsing conflict files."
+            )
             return files
 
         # Look for the "merge conflict(s):" marker
-        lines = response_body.strip().split("\n")
+        lines = response_body.strip().splitlines()
         in_conflict_section = False
+        marker_found = False
 
         for line in lines:
             line = line.strip()
+            if not line:
+                # Skip empty lines; if we're already in the conflict section,
+                # treat a blank line as the end of that section.
+                if in_conflict_section:
+                    break
+                continue
             if "merge conflict" in line.lower():
                 in_conflict_section = True
+                marker_found = True
                 continue
-            if in_conflict_section and line:
-                # Each subsequent non-empty line is a conflicting file
+            if in_conflict_section:
+                # Each subsequent non-empty line is treated as a conflicting file.
                 files.append(line)
+
+        if not marker_found:
+            # The response did not contain the expected marker; format may have changed.
+            log.warning(
+                "Failed to find 'merge conflict' marker in Gerrit response when "
+                "parsing conflict files. Raw body: %r",
+                response_body,
+            )
+        elif not files:
+            # Marker was present but no files were parsed – response format may differ.
+            log.warning(
+                "No conflicting files parsed from Gerrit response after the "
+                "'merge conflict' marker. Raw body: %r",
+                response_body,
+            )
 
         return files
 
@@ -581,6 +623,8 @@ class GerritService:
         Perform basic comparison between two changes.
 
         This is a fallback when no external comparator is provided.
+        Uses the similarity_threshold configured at initialization
+        (default: 0.8) to determine if changes are similar.
         """
         reasons: list[str] = []
         scores: list[float] = []
@@ -615,7 +659,7 @@ class GerritService:
 
         # Calculate overall score
         confidence = sum(scores) / len(scores) if scores else 0.0
-        is_similar = confidence >= 0.8
+        is_similar = confidence >= self._similarity_threshold
 
         if is_similar:
             return GerritComparisonResult.similar(confidence, reasons)
