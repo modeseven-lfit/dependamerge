@@ -7,9 +7,8 @@ This module provides a typed wrapper for Gerrit REST API calls with:
 - Bounded retries using exponential backoff with jitter
 - Request timeouts
 - Transient error classification (HTTP 5xx/429 and network errors)
-- XSSI guard stripping for Gerrit JSON responses
 
-The client prefers pygerrit2 when available and falls back to urllib.
+The client uses pygerrit2 for all Gerrit REST API interactions.
 
 Usage:
     from dependamerge.gerrit.client import GerritRestClient, build_client
@@ -20,36 +19,19 @@ Usage:
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
 import os
 import random
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Final
-from urllib.parse import urljoin, urlparse
+
+from pygerrit2 import GerritRestAPI
+from pygerrit2 import HTTPBasicAuth
+from requests.exceptions import RequestException
 
 log = logging.getLogger("dependamerge.gerrit.client")
 
-
-# Optional pygerrit2 import
-try:
-    from pygerrit2 import GerritRestAPI as _PygerritRestApi
-    from pygerrit2 import HTTPBasicAuth as _PygerritHttpAuth
-
-    PYGERRIT2_AVAILABLE = True
-except ImportError:
-    _PygerritRestApi = None  # type: ignore[assignment, misc]
-    _PygerritHttpAuth = None  # type: ignore[assignment, misc]
-    PYGERRIT2_AVAILABLE = False
-
-
-_MSG_PYGERRIT2_REQUIRED_AUTH: Final[str] = (
-    "pygerrit2 is required for HTTP authentication"
-)
 
 _TRANSIENT_ERR_SUBSTRINGS: Final[tuple[str, ...]] = (
     "timed out",
@@ -126,30 +108,20 @@ def _calculate_backoff(
     return float(delay + jitter_amount)
 
 
-def _strip_xssi_guard(text: str) -> str:
-    """
-    Strip Gerrit's XSSI guard from JSON responses.
-
-    Gerrit prepends ")]}'" to JSON responses to prevent JSON hijacking.
-    This function removes that prefix if present.
-    """
-    if text.startswith(")]}'"):
-        # Common patterns: ")]}'\n" or ")]}'\r\n"
-        if text[4:6] == "\r\n":
-            return text[6:]
-        if text[4:5] == "\n":
-            return text[5:]
-        return text[4:]
-    return text
-
-
-def _json_loads(text: str) -> Any:
-    """Parse JSON, providing clear error messages."""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        msg = f"Failed to parse JSON response: {exc}"
-        raise GerritRestError(msg) from exc
+def _extract_status_code(exc: Exception) -> int | None:
+    """Extract HTTP status code from a requests exception if available."""
+    # Check for response attribute (requests.HTTPError)
+    response = getattr(exc, "response", None)
+    if response is not None:
+        status_code = getattr(response, "status_code", None)
+        if status_code is not None:
+            return int(status_code)
+    # Check string representation for status codes
+    exc_str = str(exc)
+    for code in (401, 403, 404, 429, 500, 502, 503, 504):
+        if str(code) in exc_str:
+            return code
+    return None
 
 
 class GerritRestClient:
@@ -159,8 +131,7 @@ class GerritRestClient:
     This client provides methods for making authenticated requests to
     Gerrit's REST API with automatic retry on transient failures.
 
-    If pygerrit2 is available, it uses that library for requests.
-    Otherwise, it falls back to urllib with manual request construction.
+    Uses pygerrit2 for all Gerrit REST API interactions.
     """
 
     def __init__(
@@ -190,29 +161,22 @@ class GerritRestClient:
         if auth and auth[0] and auth[1]:
             self._auth = _Auth(auth[0], auth[1])
 
-        # Build pygerrit client if library is present
-        self._client: Any = None
-        if PYGERRIT2_AVAILABLE and _PygerritRestApi is not None:
-            if self._auth is not None:
-                if _PygerritHttpAuth is None:
-                    raise GerritRestError(_MSG_PYGERRIT2_REQUIRED_AUTH)
-                self._client = _PygerritRestApi(
-                    url=self._base_url,
-                    auth=_PygerritHttpAuth(
-                        self._auth.user, self._auth.password
-                    ),
-                )
-            else:
-                self._client = _PygerritRestApi(url=self._base_url)
+        # Build pygerrit2 client
+        if self._auth is not None:
+            self._client = GerritRestAPI(
+                url=self._base_url,
+                auth=HTTPBasicAuth(self._auth.user, self._auth.password),
+            )
+        else:
+            self._client = GerritRestAPI(url=self._base_url)
 
         log.debug(
             "GerritRestClient initialized: base_url=%s, timeout=%.1fs, "
-            "max_attempts=%d, auth_user=%s, pygerrit2=%s",
+            "max_attempts=%d, auth_user=%s",
             self._base_url,
             self._timeout,
             self._max_attempts,
             self._auth.user if self._auth else "(none)",
-            "available" if PYGERRIT2_AVAILABLE else "not available",
         )
 
     @property
@@ -312,20 +276,37 @@ class GerritRestClient:
                 raise
             except GerritRestError as exc:
                 last_exception = exc
-                # Check if this is a retryable HTTP error
-                if exc.status_code and exc.status_code in _RETRYABLE_HTTP_CODES:
+                # Check if this is a retryable HTTP error or transient network error
+                is_retryable_http = (
+                    exc.status_code and exc.status_code in _RETRYABLE_HTTP_CODES
+                )
+                is_transient = _is_transient_error(exc)
+
+                if is_retryable_http or is_transient:
                     if attempt < self._max_attempts - 1:
                         delay = _calculate_backoff(attempt)
-                        log.warning(
-                            "Gerrit REST %s %s failed (HTTP %d), "
-                            "retrying in %.1fs (attempt %d/%d)",
-                            method,
-                            path,
-                            exc.status_code,
-                            delay,
-                            attempt + 1,
-                            self._max_attempts,
-                        )
+                        if exc.status_code:
+                            log.warning(
+                                "Gerrit REST %s %s failed (HTTP %d), "
+                                "retrying in %.1fs (attempt %d/%d)",
+                                method,
+                                path,
+                                exc.status_code,
+                                delay,
+                                attempt + 1,
+                                self._max_attempts,
+                            )
+                        else:
+                            log.warning(
+                                "Gerrit REST %s %s failed (%s), "
+                                "retrying in %.1fs (attempt %d/%d)",
+                                method,
+                                path,
+                                exc,
+                                delay,
+                                attempt + 1,
+                                self._max_attempts,
+                            )
                         time.sleep(delay)
                         continue
                 raise
@@ -362,38 +343,64 @@ class GerritRestClient:
         path: str,
         data: Any | None = None,
     ) -> Any:
-        """Perform a single HTTP request (no retry)."""
+        """Perform a single HTTP request (no retry) using pygerrit2."""
         if not path:
-            raise ValueError("path is required")
+            raise GerritRestError("path is required")
 
-        # Normalize path (ensure it doesn't double up with base_url)
-        rel_path = path[1:] if path.startswith("/") else path
+        # Normalize path to start with /
+        api_path = path if path.startswith("/") else f"/{path}"
 
-        # Use pygerrit2 for GET requests if available
-        # Note: pygerrit2 automatically adds /a/ prefix when HTTPBasicAuth is configured
-        if self._client is not None and method == "GET" and data is None:
-            pygerrit_path = path if path.startswith("/") else f"/{path}"
-            return self._request_via_pygerrit(pygerrit_path)
+        log.debug(
+            "Gerrit REST %s %s (auth=%s)",
+            method,
+            api_path,
+            "yes" if self._auth else "no",
+        )
 
-        # For urllib requests with authentication, Gerrit requires the /a/ prefix
-        # https://gerrit-review.googlesource.com/Documentation/rest-api.html#authentication
-        if self._auth is not None and not rel_path.startswith("a/"):
-            rel_path = f"a/{rel_path}"
-
-        url = urljoin(self._base_url, rel_path)
-
-        # Fall back to urllib
-        return self._request_via_urllib(method, url, path, data)
-
-    def _request_via_pygerrit(self, path: str) -> Any:
-        """Perform a GET request using pygerrit2."""
-        log.debug("Gerrit REST GET via pygerrit2: %s", path)
         try:
-            # pygerrit2.get expects a path starting with /
-            api_path = path if path.startswith("/") else f"/{path}"
-            return self._client.get(api_path)
+            if method == "GET":
+                return self._client.get(api_path, timeout=self._timeout)
+            elif method == "POST":
+                if data is not None:
+                    return self._client.post(api_path, data=data, timeout=self._timeout)
+                return self._client.post(api_path, timeout=self._timeout)
+            elif method == "PUT":
+                if data is not None:
+                    return self._client.put(api_path, data=data, timeout=self._timeout)
+                return self._client.put(api_path, timeout=self._timeout)
+            elif method == "DELETE":
+                return self._client.delete(api_path, timeout=self._timeout)
+            else:
+                raise GerritRestError(f"Unsupported HTTP method: {method}")
+
+        except RequestException as exc:
+            # Handle requests exceptions from pygerrit2
+            status_code = _extract_status_code(exc)
+            exc_str = str(exc).lower()
+
+            if status_code == 401 or "401" in exc_str or "unauthorized" in exc_str:
+                raise GerritAuthError(
+                    f"Authentication failed for {path}",
+                    status_code=401,
+                ) from exc
+            if status_code == 403 or "403" in exc_str or "forbidden" in exc_str:
+                raise GerritAuthError(
+                    f"Access forbidden for {path}",
+                    status_code=403,
+                ) from exc
+            if status_code == 404 or "404" in exc_str or "not found" in exc_str:
+                raise GerritNotFoundError(
+                    f"Resource not found: {path}",
+                    status_code=404,
+                ) from exc
+
+            raise GerritRestError(
+                f"Gerrit REST {method} {path} failed: {exc}",
+                status_code=status_code,
+            ) from exc
+
         except Exception as exc:
-            # pygerrit2 may raise various exceptions
+            # Handle any other exceptions
             exc_str = str(exc).lower()
             if "401" in exc_str or "unauthorized" in exc_str:
                 raise GerritAuthError(
@@ -407,91 +414,7 @@ class GerritRestClient:
                 raise GerritNotFoundError(
                     f"Resource not found: {exc}", status_code=404
                 ) from exc
-            raise GerritRestError(f"Gerrit REST GET failed: {exc}") from exc
-
-    def _request_via_urllib(
-        self,
-        method: str,
-        url: str,
-        path: str,
-        data: Any | None = None,
-    ) -> Any:
-        """Perform a request using urllib."""
-        headers = {"Accept": "application/json"}
-        body_bytes: bytes | None = None
-
-        if data is not None:
-            headers["Content-Type"] = "application/json"
-            body_bytes = json.dumps(data).encode("utf-8")
-
-        if self._auth is not None:
-            token = base64.b64encode(
-                f"{self._auth.user}:{self._auth.password}".encode()
-            ).decode("ascii")
-            headers["Authorization"] = f"Basic {token}"
-
-        # Validate URL scheme
-        scheme = urlparse(url).scheme
-        if scheme not in ("http", "https"):
-            raise GerritRestError(f"Unsupported URL scheme: {scheme}")
-
-        req = urllib.request.Request(
-            url, data=body_bytes, method=method, headers=headers
-        )
-
-        log.debug(
-            "Gerrit REST %s %s (auth=%s)",
-            method,
-            url,
-            "yes" if self._auth else "no",
-        )
-
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                content = resp.read()
-                text = content.decode("utf-8", errors="replace")
-                text = _strip_xssi_guard(text)
-                if not text.strip():
-                    return {}
-                return _json_loads(text)
-
-        except urllib.error.HTTPError as http_exc:
-            status = http_exc.code
-            body = ""
-            try:
-                body = http_exc.read().decode("utf-8", errors="replace")
-            except Exception as exc:
-                log.debug("Failed to read HTTP error response body: %s", exc)
-
-            if status == 401:
-                raise GerritAuthError(
-                    f"Authentication failed for {path}",
-                    status_code=status,
-                    response_body=body,
-                ) from http_exc
-            if status == 403:
-                raise GerritAuthError(
-                    f"Access forbidden for {path}",
-                    status_code=status,
-                    response_body=body,
-                ) from http_exc
-            if status == 404:
-                raise GerritNotFoundError(
-                    f"Resource not found: {path}",
-                    status_code=status,
-                    response_body=body,
-                ) from http_exc
-
-            raise GerritRestError(
-                f"Gerrit REST {method} {path} failed with HTTP {status}",
-                status_code=status,
-                response_body=body,
-            ) from http_exc
-
-        except urllib.error.URLError as url_exc:
-            raise GerritRestError(
-                f"Gerrit REST {method} {path} failed: {url_exc.reason}"
-            ) from url_exc
+            raise GerritRestError(f"Gerrit REST {method} failed: {exc}") from exc
 
     def __repr__(self) -> str:
         """String representation for debugging."""
@@ -564,6 +487,5 @@ __all__ = [
     "GerritNotFoundError",
     "GerritRestClient",
     "GerritRestError",
-    "PYGERRIT2_AVAILABLE",
     "build_client",
 ]

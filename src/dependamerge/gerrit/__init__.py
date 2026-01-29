@@ -22,7 +22,6 @@ Usage:
 """
 
 from dependamerge.gerrit.client import (
-    PYGERRIT2_AVAILABLE,
     GerritAuthError,
     GerritNotFoundError,
     GerritRestClient,
@@ -67,7 +66,6 @@ __all__ = [
     "GerritNotFoundError",
     "GerritRestClient",
     "GerritRestError",
-    "PYGERRIT2_AVAILABLE",
     "build_client",
     # Models
     "GerritChangeInfo",
