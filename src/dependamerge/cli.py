@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import sys
+from pathlib import Path
 
 import requests
 import typer
@@ -28,6 +29,15 @@ from .error_codes import (
     is_github_api_permission_error,
     is_network_error,
 )
+from .gerrit import (
+    GerritAuthError,
+    GerritChangeInfo,
+    GerritComparisonResult,
+    GerritRestError,
+    create_gerrit_comparator,
+    create_gerrit_service,
+    create_submit_manager,
+)
 from .git_ops import GitError
 from .github_async import (
     GitHubAsync,
@@ -44,8 +54,13 @@ from .merge_manager import AsyncMergeManager
 from .models import PullRequestInfo
 from .pr_comparator import PRComparator
 from .progress_tracker import MergeProgressTracker, ProgressTracker
+from .netrc import (
+    NetrcParseError,
+    resolve_gerrit_credentials,
+)
 from .resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
 from .system_utils import get_default_workers
+from .url_parser import ParsedUrl, UrlParseError, parse_change_url
 
 # Constants
 MAX_RETRIES = 2
@@ -194,9 +209,297 @@ def _format_condensed_similarity(comparison) -> str:
     return f"{author_text}{total_score}{breakdown}"
 
 
+def _display_change_info(
+    change: GerritChangeInfo,
+    title: str = "",
+    console: Console = console,
+    auth_method: str | None = None,
+) -> None:
+    """Display Gerrit change information in a formatted table.
+
+    Args:
+        change: The Gerrit change info to display.
+        title: Optional title for the table.
+        console: Rich console for output.
+        auth_method: Description of authentication method used (e.g., ".netrc file").
+    """
+
+    table = Table(title=title if title else None)
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="green")
+
+    # Map Gerrit status to user-friendly description
+    status_map = {
+        "NEW": "Open (awaiting review)",
+        "MERGED": "Merged",
+        "ABANDONED": "Abandoned",
+    }
+    status_display = status_map.get(change.status, change.status)
+
+    # Check if change is submittable (check merge conflicts first!)
+    if change.status == "NEW":
+        if change.mergeable is False:
+            status_display = "Has merge conflicts"
+        elif change.submittable:
+            status_display = "Ready to submit"
+
+    table.add_row("Project", change.project)
+    table.add_row("Change Number", str(change.number))
+    table.add_row("Subject", change.subject)
+    table.add_row("Owner", change.owner)
+    table.add_row("Branch", change.branch)
+    table.add_row("State", change.status)
+    table.add_row("Status", status_display)
+    if change.files_changed:
+        table.add_row("Files Changed", str(len(change.files_changed)))
+    if change.url:
+        table.add_row("URL", change.url)
+    if auth_method:
+        table.add_row("Auth Method", auth_method)
+
+    console.print(table)
+
+
+def _format_gerrit_similarity(comparison: GerritComparisonResult) -> str:
+    """Format Gerrit comparison result in condensed format."""
+    reasons = comparison.reasons
+
+    # Check if same author is present
+    has_same_author = any("Same automation author" in reason for reason in reasons)
+
+    # Build condensed format
+    if has_same_author:
+        author_text = "Same author; "
+    else:
+        author_text = ""
+
+    total_score = f"total score: {comparison.confidence_score:.2f}"
+
+    # Extract individual scores from reasons
+    score_parts = []
+    for reason in reasons:
+        if "Similar subjects" in reason and "score:" in reason:
+            score = reason.split("score: ")[1].replace(")", "")
+            score_parts.append(f"subject {score}")
+        elif "Similar files" in reason and "score:" in reason:
+            score = reason.split("score: ")[1].replace(")", "")
+            score_parts.append(f"files {score}")
+
+    if score_parts:
+        breakdown = f" [{', '.join(score_parts)}]"
+    else:
+        breakdown = ""
+
+    return f"{author_text}{total_score}{breakdown}"
+
+
+def _handle_gerrit_merge(
+    parsed_url: ParsedUrl,
+    no_confirm: bool,
+    similarity_threshold: float,
+    verbose: bool,
+    console: Console,
+    no_netrc: bool = False,
+    netrc_file: Path | None = None,
+    netrc_optional: bool = True,
+) -> None:
+    """
+    Handle merge operation for a Gerrit change URL.
+
+    Args:
+        parsed_url: Parsed Gerrit URL with host, project, and change number.
+        no_confirm: If True, skip confirmation prompt.
+        similarity_threshold: Threshold for matching similar changes.
+        verbose: Enable verbose output.
+        console: Rich console for output.
+        no_netrc: If True, skip .netrc credential lookup.
+        netrc_file: Explicit path to a .netrc file.
+        netrc_optional: If True, don't fail if netrc not found.
+    """
+    # Resolve Gerrit credentials from all sources using centralized function
+    try:
+        credentials = resolve_gerrit_credentials(
+            host=parsed_url.host,
+            use_netrc=not no_netrc,
+            netrc_file=netrc_file,
+        )
+    except NetrcParseError as e:
+        console.print(f"⚠️  Error parsing .netrc file: {e}")
+        credentials = None
+
+    if credentials is None or not credentials.is_valid:
+        console.print("❌ Gerrit credentials not found.")
+        console.print("   Options:")
+        console.print("   1. Create a ~/.netrc file with Gerrit credentials")
+        console.print("   2. Set GERRIT_USERNAME and GERRIT_PASSWORD environment variables")
+        console.print("   Tip: Source your .secrets.gerrit file and run use_lf or use_onap")
+        raise typer.Exit(1)
+
+    if verbose:
+        console.print(f"🔑 Using credentials from {credentials.auth_method_display()}")
+
+    console.print(f"🔍 Examining Gerrit change on {parsed_url.host}...")
+
+    try:
+        # Create Gerrit service
+        service = create_gerrit_service(
+            host=parsed_url.host,
+            base_path=parsed_url.base_path,
+            username=credentials.username,
+            password=credentials.password,
+        )
+
+        if not service.is_authenticated:
+            console.print("⚠️  Warning: Service created but may not be authenticated")
+
+        # Get the source change info
+        console.print(f"📋 Fetching change {parsed_url.change_number}...")
+        source_change = service.get_change_info(parsed_url.change_number)
+
+        if source_change is None:
+            console.print(f"❌ Change {parsed_url.change_number} not found")
+            raise typer.Exit(1)
+
+        # Display source change info using Rich table (same style as GitHub)
+        _display_change_info(
+            source_change,
+            console=console,
+            auth_method=credentials.auth_method_display(),
+        )
+
+        if source_change.status == "MERGED":
+            console.print("\n✅ Change is already merged.")
+            raise typer.Exit(0)
+
+        if source_change.status == "ABANDONED":
+            console.print("\n❌ Change has been abandoned.")
+            raise typer.Exit(1)
+
+        # Check for merge conflicts and attempt rebase if needed
+        if source_change.mergeable is False:
+            console.print("\n⚠️  Change has merge conflicts. Attempting to rebase...")
+            rebase_result = service.rebase_change(source_change.number)
+
+            if rebase_result["success"]:
+                console.print("✅ Rebase successful! Refreshing change info...")
+                # Refresh the change info after successful rebase
+                source_change = service.get_change_info(parsed_url.change_number)
+                _display_change_info(
+                    source_change,
+                    console=console,
+                    auth_method=credentials.auth_method_display(),
+                )
+            elif rebase_result["conflict"]:
+                console.print("\n❌ Rebase failed due to merge conflicts:")
+                if rebase_result["conflicting_files"]:
+                    console.print("\n   Conflicting files:")
+                    for file_path in rebase_result["conflicting_files"]:
+                        console.print(f"   • {file_path}")
+                console.print("\n💡 To resolve: manually rebase the change locally and push a new patchset.")
+                console.print(f"   git review -d {source_change.number}")
+                console.print(f"   git rebase origin/{source_change.branch}")
+                console.print("   # resolve conflicts, then:")
+                console.print("   git review")
+                raise typer.Exit(1)
+            else:
+                console.print(f"\n❌ Rebase failed: {rebase_result['error']}")
+                raise typer.Exit(1)
+
+        # Create comparator and find similar changes
+        comparator = create_gerrit_comparator(similarity_threshold=similarity_threshold)
+
+        console.print(f"\n🔍 Searching for similar changes on {parsed_url.host}...")
+        similar_changes = service.find_similar_changes(
+            source_change,
+            comparator,
+        )
+
+        console.print(f"Found {len(similar_changes)} similar changes:")
+
+        if similar_changes:
+            for change, comparison in similar_changes:
+                console.print(f"  • {change.project} #{change.number}: {change.subject}")
+                console.print(f"    {_format_gerrit_similarity(comparison)}")
+
+        # Prepare list of changes to submit (similar + source)
+        all_changes: list[tuple[GerritChangeInfo, GerritComparisonResult | None]] = (
+            similar_changes + [(source_change, None)]
+        )
+
+        # Check permissions on the source change before proceeding
+        # Permissions are per-project in Gerrit, so we check the source change
+        # and warn if the user may not have sufficient permissions
+        permission_warnings = source_change.get_permission_warnings()
+        if permission_warnings:
+            console.print("\n⚠️  Permission warnings:")
+            for warning in permission_warnings:
+                console.print(f"   • {warning}")
+            console.print(
+                "\n   Note: Permissions vary by project. The operation may still "
+                "succeed on some changes."
+            )
+
+        if not no_confirm:
+            # Preview mode - show permission status
+            console.print(f"\n📊 Preview: {len(all_changes)} changes would be reviewed and submitted")
+            if source_change.has_required_permissions():
+                console.print("   ✅ You appear to have required permissions (+2 Code-Review, submit)")
+            else:
+                console.print("   ⚠️  You may not have all required permissions (see warnings above)")
+            console.print("\nTo proceed, run with --no-confirm flag")
+            return
+
+        # Create submit manager and submit changes
+        console.print(f"\n🚀 Submitting {len(all_changes)} changes...")
+
+        submit_manager = create_submit_manager(
+            host=parsed_url.host,
+            base_path=parsed_url.base_path,
+            username=credentials.username,
+            password=credentials.password,
+        )
+
+        # Pass the tuples directly (submit_changes expects list of tuples)
+        results = submit_manager.submit_changes(all_changes)
+
+        # Display results (GerritSubmitResult has success/submitted/error fields)
+        submitted_count = sum(1 for r in results if r.submitted)
+        reviewed_count = sum(1 for r in results if r.reviewed and not r.submitted)
+        failed_count = sum(1 for r in results if not r.success)
+
+        console.print(f"\n📈 Results:")
+        console.print(f"   ✅ Submitted: {submitted_count}")
+        if reviewed_count > 0:
+            console.print(f"   📝 Reviewed (not submitted): {reviewed_count}")
+        if failed_count > 0:
+            console.print(f"   ❌ Failed: {failed_count}")
+
+        # Show details for failed submissions
+        for result in results:
+            if not result.success:
+                console.print(f"\n   ❌ {result.project} #{result.change_number}: {result.error}")
+
+    except typer.Exit:
+        # Re-raise typer.Exit without treating it as an error
+        raise
+    except GerritAuthError as e:
+        console.print(f"❌ Gerrit authentication failed: {e}")
+        console.print("   Check your GERRIT_USERNAME and GERRIT_PASSWORD")
+        raise typer.Exit(1)
+    except GerritRestError as e:
+        console.print(f"❌ Gerrit API error: {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"❌ Error during Gerrit merge operation: {e}")
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        raise typer.Exit(1)
+
+
 @app.command()
 def merge(
-    pr_url: str = typer.Argument(..., help="GitHub pull request URL"),
+    pr_url: str = typer.Argument(..., help="GitHub PR URL or Gerrit change URL"),
     no_confirm: bool = typer.Option(
         False,
         "--no-confirm",
@@ -243,14 +546,36 @@ def merge(
         "-v",
         help="Enable verbose debug logging",
     ),
+    no_netrc: bool = typer.Option(
+        False,
+        "--no-netrc",
+        help="Disable .netrc credential lookup for Gerrit authentication",
+    ),
+    netrc_file: Path | None = typer.Option(
+        None,
+        "--netrc-file",
+        help="Explicit path to .netrc file for Gerrit credentials",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    netrc_optional: bool = typer.Option(
+        True,
+        "--netrc-optional/--netrc-required",
+        help="Whether to fail if .netrc file is not found (default: optional)",
+    ),
 ):
     """
-    Bulk approve/merge pull requests across a GitHub organization.
+    Bulk approve/merge pull requests or Gerrit changes.
+
+    Supports both GitHub PRs and Gerrit Code Review changes.
 
     By default, runs in interactive mode showing what changes will apply,
     then prompts to proceed with merge. Use --no-confirm to merge immediately.
 
-    This command will:
+    For GitHub PRs, this command will:
 
     1. Analyze the provided PR
 
@@ -260,15 +585,31 @@ def merge(
 
     4. Automatically fix out-of-date branches (use --no-fix to disable)
 
-    Merges similar PRs from the same automation tool (dependabot, pre-commit.ci).
+    For Gerrit changes, this command will:
+
+    1. Analyze the provided change
+
+    2. Find similar open changes on the server
+
+    3. Review (+2 Code-Review) and submit matching changes
+
+    Merges similar PRs/changes from the same automation tool.
 
     For user generated bulk PRs, use the --override flag with SHA hash.
 
-    Force levels:
+    GitHub Force levels:
     - none: Respect all protections
     - code-owners: Bypass code owner review requirements (default)
     - protection-rules: Bypass branch protection checks (requires permissions)
     - all: Attempt merge despite most warnings (not recommended)
+
+    Authentication (Gerrit):
+    Credentials are loaded in this order:
+    1. .netrc file (if not disabled with --no-netrc)
+    2. Environment variables: GERRIT_USERNAME and GERRIT_PASSWORD
+
+    .netrc search order: ./netrc, ~/.netrc, ~/_netrc (Windows)
+    Use --netrc-file to specify an explicit path.
     """
     # Configure logging
     if verbose:
@@ -303,7 +644,30 @@ def merge(
     progress_tracker = None
 
     try:
-        # Parse PR URL first to get organization info
+        # Parse URL to detect platform (GitHub or Gerrit)
+        try:
+            parsed_url = parse_change_url(pr_url)
+        except UrlParseError as e:
+            console.print(f"❌ Invalid URL: {e}")
+            raise typer.Exit(1)
+
+        # Route to appropriate handler based on platform
+        if parsed_url.is_gerrit:
+            # Handle Gerrit change
+            _handle_gerrit_merge(
+                parsed_url=parsed_url,
+                no_confirm=no_confirm,
+                similarity_threshold=similarity_threshold,
+                verbose=verbose,
+                console=console,
+                no_netrc=no_netrc,
+                netrc_file=netrc_file,
+                netrc_optional=netrc_optional,
+            )
+            return
+
+        # GitHub flow continues below
+        # Parse PR URL to get organization info
         github_client = GitHubClient(token)
         owner, repo_name, pr_number = github_client.parse_pr_url(pr_url)
 
