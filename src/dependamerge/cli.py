@@ -619,7 +619,7 @@ def merge(
         )
     else:
         logging.basicConfig(
-            level=logging.INFO,
+            level=logging.WARNING,
             format="%(levelname)s - %(message)s",
         )
         # Suppress noisy HTTP request logs from httpx and httpcore unless verbose
