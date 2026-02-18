@@ -62,9 +62,9 @@ autolabeler:
       - "/docs:/i"
 # yamllint disable rule:line-length
 template: |
-  [![Downloads for this release](https://img.shields.io/github/downloads/os-climate/osc-github-devops/v$RESOLVED_VERSION/total.svg)](https://github.com/os-climate/osc-github-devops/releases/v$RESOLVED_VERSION)
+  [![Downloads for this release](https://img.shields.io/github/downloads/lfit/dependamerge/v$RESOLVED_VERSION/total.svg)](https://github.com/lfit/dependamerge/releases/v$RESOLVED_VERSION)
 
   $CHANGES
 
   ## Links
-  - [Submit bugs/feature requests](https://github.com/os-climate/osc-github-devops/issues)
+  - [Submit bugs/feature requests](https://github.com/lfit/dependamerge/issues)
