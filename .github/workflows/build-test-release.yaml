@@ -198,6 +198,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e  # v2.14.2
+        with:
+          egress-policy: 'audit'
+
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -242,6 +248,8 @@ jobs:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
           output-format: "table"
           output-file: "grype-results.txt"
+          # Differs from build-test.yaml, which requires fixes to be applied
+          # Deliberately set to not block releases if/when tags are pushed
           fail-build: "false"
 
       - name: "Upload Grype scan results"
@@ -371,7 +379,8 @@ jobs:
       contents: write  # IMPORTANT: needed for draft release promotion
     timeout-minutes: 2
     outputs:
-      release_url: "${{ steps.promote-release.outputs.release_url }}"
+      # yamllint disable-line rule:line-length
+      release_url: "${{ steps.promote-release.outputs.release_url || steps.set-promoted-url.outputs.release_url }}"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -410,6 +419,7 @@ jobs:
           latest: true
 
       - name: 'Set release URL for already promoted release'
+        id: 'set-promoted-url'
         if: steps.check-promoted.outputs.already_promoted == 'true'
         shell: bash
         env:
