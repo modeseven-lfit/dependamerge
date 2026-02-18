@@ -551,6 +551,8 @@ class TestBuildClient:
     @patch("dependamerge.gerrit.client.HTTPBasicAuth")
     def test_build_client_env_fallback(self, mock_auth, mock_api, monkeypatch):
         """Test credential fallback from GERRIT_HTTP_USER/PASSWORD."""
+        monkeypatch.delenv("GERRIT_USERNAME", raising=False)
+        monkeypatch.delenv("GERRIT_PASSWORD", raising=False)
         monkeypatch.setenv("GERRIT_HTTP_USER", "httpuser")
         monkeypatch.setenv("GERRIT_HTTP_PASSWORD", "httppass")
 
