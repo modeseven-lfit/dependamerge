@@ -29,8 +29,7 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
-permissions:
-  actions: write  # Required for cache deletion when clear_cache is true
+permissions: {}
 
 jobs:
   repository-metadata:
