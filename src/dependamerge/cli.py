@@ -622,10 +622,12 @@ def merge(
             level=logging.WARNING,
             format="%(levelname)s - %(message)s",
         )
-        # Suppress noisy HTTP request logs from httpx and httpcore unless verbose
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
-        logging.getLogger("hpack").setLevel(logging.WARNING)
+
+    # Always suppress noisy third-party HTTP/connection library logs.
+    # --verbose enables debug logging for dependamerge code, not for every
+    # library in the dependency tree.
+    for noisy_logger in ("httpx", "httpcore", "hpack", "h2", "asyncio", "urllib3"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     # Validate force level
     valid_force_levels = ["none", "code-owners", "protection-rules", "all"]

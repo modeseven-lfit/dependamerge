@@ -1359,10 +1359,13 @@ class AsyncMergeManager:
                 )
 
                 # Check for specific blocking conditions that indicate protection rules
-                if mergeable_state == "blocked":
+                if mergeable_state == "blocked" and mergeable is False:
                     # Before declaring the PR unmergeable, analyze WHY it's blocked.
                     # If the only blocker is "requires approval", the tool is about to
                     # provide that approval — so we should allow the merge to proceed.
+                    # Note: we only call analyze_block_reason when mergeable is False
+                    # to avoid unnecessary API traffic; when mergeable is True/None the
+                    # code falls through to the pass-through return at the end.
                     block_reason = ""
                     if head_sha and self._github_client:
                         try:
@@ -1385,14 +1388,13 @@ class AsyncMergeManager:
                         )
                         return True, "PR blocked pending approval (tool will approve)"
 
-                    # For other blocking reasons with mergeable=False, check force level
-                    if mergeable is False:
-                        if self.force_level in ["code-owners", "protection-rules", "all"]:
-                            self.log.info(
-                                f"Force level '{self.force_level}' bypassing branch protection rules for {owner}/{repo}#{pr_number}"
-                            )
-                            return True, "branch protection bypassed by force level"
-                        return False, f"branch protection rules prevent merge ({block_reason or 'blocked'})"
+                    # For other blocking reasons, check force level
+                    if self.force_level in ["code-owners", "protection-rules", "all"]:
+                        self.log.info(
+                            f"Force level '{self.force_level}' bypassing branch protection rules for {owner}/{repo}#{pr_number}"
+                        )
+                        return True, "branch protection bypassed by force level"
+                    return False, f"branch protection rules prevent merge ({block_reason or 'blocked'})"
                 elif mergeable_state == "dirty":
                     return False, "merge conflicts"
                 elif mergeable_state == "behind":
