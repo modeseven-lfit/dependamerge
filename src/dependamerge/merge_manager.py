@@ -1352,19 +1352,47 @@ class AsyncMergeManager:
             if isinstance(pr_data, dict):
                 mergeable_state = pr_data.get("mergeable_state", "unknown")
                 mergeable = pr_data.get("mergeable")
+                head_sha = pr_data.get("head", {}).get("sha", "")
 
                 self.log.debug(
                     f"PR {owner}/{repo}#{pr_number} REST API status: mergeable={mergeable}, mergeable_state={mergeable_state}"
                 )
 
                 # Check for specific blocking conditions that indicate protection rules
-                if mergeable_state == "blocked" and mergeable is False:
-                    if self.force_level in ["code-owners", "protection-rules", "all"]:
+                if mergeable_state == "blocked":
+                    # Before declaring the PR unmergeable, analyze WHY it's blocked.
+                    # If the only blocker is "requires approval", the tool is about to
+                    # provide that approval — so we should allow the merge to proceed.
+                    block_reason = ""
+                    if head_sha and self._github_client:
+                        try:
+                            block_reason = await self._github_client.analyze_block_reason(
+                                owner, repo, pr_number, head_sha
+                            )
+                            self.log.debug(
+                                f"PR {owner}/{repo}#{pr_number} block reason: {block_reason}"
+                            )
+                        except Exception as analyze_err:
+                            self.log.debug(
+                                f"Could not analyze block reason for {owner}/{repo}#{pr_number}: {analyze_err}"
+                            )
+
+                    # If the PR is only blocked because it needs approval, allow it
+                    # through — the tool will approve it before attempting merge.
+                    if "requires approval" in block_reason.lower():
                         self.log.info(
-                            f"Force level '{self.force_level}' bypassing branch protection rules for {owner}/{repo}#{pr_number}"
+                            f"PR {owner}/{repo}#{pr_number} is blocked pending approval — tool will approve before merge"
                         )
-                        return True, "branch protection bypassed by force level"
-                    return False, "branch protection rules prevent merge"
+                        return True, "PR blocked pending approval (tool will approve)"
+
+                    # For other blocking reasons with mergeable=False, check force level
+                    if mergeable is False:
+                        if self.force_level in ["code-owners", "protection-rules", "all"]:
+                            self.log.info(
+                                f"Force level '{self.force_level}' bypassing branch protection rules for {owner}/{repo}#{pr_number}"
+                            )
+                            return True, "branch protection bypassed by force level"
+                        return False, f"branch protection rules prevent merge ({block_reason or 'blocked'})"
                 elif mergeable_state == "dirty":
                     return False, "merge conflicts"
                 elif mergeable_state == "behind":
@@ -1374,7 +1402,7 @@ class AsyncMergeManager:
                             "PR is behind base branch and --no-fix option is set",
                         )
                     # Otherwise it's fixable
-                elif mergeable is False and mergeable_state in ["unknown", "blocked"]:
+                elif mergeable is False and mergeable_state == "unknown":
                     # This often indicates hidden branch protection rules
                     if self.force_level in ["code-owners", "protection-rules", "all"]:
                         self.log.info(
