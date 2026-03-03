@@ -612,22 +612,20 @@ def merge(
     Use --netrc-file to specify an explicit path.
     """
     # Configure logging
+    # Keep the root logger at WARNING (or INFO) so third-party libraries stay
+    # quiet by default.  --verbose only enables DEBUG for the dependamerge
+    # logger hierarchy, avoiding the need for an ever-growing suppression list.
     if verbose:
         logging.basicConfig(
-            level=logging.DEBUG,
+            level=logging.WARNING,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         )
+        logging.getLogger("dependamerge").setLevel(logging.DEBUG)
     else:
         logging.basicConfig(
             level=logging.WARNING,
             format="%(levelname)s - %(message)s",
         )
-
-    # Always suppress noisy third-party HTTP/connection library logs.
-    # --verbose enables debug logging for dependamerge code, not for every
-    # library in the dependency tree.
-    for noisy_logger in ("httpx", "httpcore", "hpack", "h2", "asyncio", "urllib3"):
-        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     # Validate force level
     valid_force_levels = ["none", "code-owners", "protection-rules", "all"]

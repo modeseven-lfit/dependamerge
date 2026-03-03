@@ -319,6 +319,32 @@ class AsyncMergeManager:
                             f"⚠️  Overriding blocking reviews for {pr_info.repository_full_name}#{pr_info.number} (--force=all)"
                         )
 
+            # Step 0.5: If the PR is blocked, check for stale pre-commit.ci
+            # and trigger a re-run before evaluating merge requirements.
+            # Avoid triggering side effects when running in preview mode.
+            if (
+                not self.preview_mode
+                and pr_info.mergeable_state == "blocked"
+                and self._github_client
+            ):
+                precommit_fixed = await self._trigger_stale_precommit_ci(pr_info)
+                if precommit_fixed:
+                    # Re-fetch PR state now that pre-commit.ci has passed
+                    try:
+                        updated = await self._github_client.get(
+                            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}"
+                        )
+                        if isinstance(updated, dict):
+                            pr_info.mergeable = updated.get("mergeable")
+                            pr_info.mergeable_state = updated.get("mergeable_state")
+                    except Exception as e:
+                        self.log.debug(
+                            "Failed to refresh PR %s mergeable state after "
+                            "pre-commit.ci rerun: %s",
+                            f"{pr_info.repository_full_name}#{pr_info.number}",
+                            e,
+                        )
+
             # Step 1: Check merge requirements (including branch protection)
             can_merge, merge_check_reason = await self._check_merge_requirements(
                 pr_info
@@ -884,6 +910,160 @@ class AsyncMergeManager:
                 return (False, "merge conflicts")
 
         return True, "All merge requirements appear to be met"
+
+    async def _trigger_stale_precommit_ci(
+        self, pr_info: PullRequestInfo
+    ) -> bool:
+        """
+        Detect and retrigger a stuck pre-commit.ci run by posting a comment.
+
+        pre-commit.ci uses the commit status API and sometimes fails to report
+        any status at all, leaving the PR permanently blocked when
+        'pre-commit.ci - pr' is a required status check. Posting the comment
+        ``pre-commit.ci run`` triggers a fresh run.
+
+        Args:
+            pr_info: Pull request information
+
+        Returns:
+            True if a retrigger comment was posted and the status check
+            subsequently completed, False otherwise.
+        """
+        if not self._github_client:
+            return False
+
+        repo_owner, repo_name = pr_info.repository_full_name.split("/", 1)
+        precommit_context = "pre-commit.ci - pr"
+
+        # 1. Check whether pre-commit.ci is a required status check
+        try:
+            required_checks = await self._github_client.get_required_status_checks(
+                repo_owner, repo_name, pr_info.base_branch or "main"
+            )
+            required_contexts = [
+                c.get("context", "") for c in required_checks if isinstance(c, dict)
+            ]
+            if precommit_context not in required_contexts:
+                return False
+        except Exception:
+            return False
+
+        # 2. Check whether the status has already been reported
+        try:
+            status_data = await self._github_client.get(
+                f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/status"
+            )
+            if isinstance(status_data, dict):
+                for s in status_data.get("statuses", []):
+                    if isinstance(s, dict) and s.get("context") == precommit_context:
+                        # Status exists (success, pending, failure, etc.) — not stale
+                        return False
+        except Exception as e:
+            self.log.debug(
+                "Failed to fetch commit status for pre-commit.ci check on %s#%s "
+                "(sha=%s); skipping retrigger: %s",
+                pr_info.repository_full_name,
+                pr_info.number,
+                pr_info.head_sha,
+                e,
+            )
+            return False
+
+        # 3. Status is missing entirely — check for an existing trigger comment
+        # before posting a duplicate (avoids spam if dependamerge runs repeatedly
+        # while the status is still missing).
+        try:
+            comments = await self._github_client.get(
+                f"/repos/{repo_owner}/{repo_name}/issues/{pr_info.number}/comments?per_page=100"
+            )
+            if isinstance(comments, list):
+                for c in comments:
+                    if not isinstance(c, dict):
+                        continue
+                    body = c.get("body")
+                    if isinstance(body, str) and body.strip() == "pre-commit.ci run":
+                        self.log.info(
+                            "Found existing pre-commit.ci trigger comment on "
+                            f"{pr_info.repository_full_name}#{pr_info.number}; "
+                            "skipping duplicate comment."
+                        )
+                        return False
+        except Exception:
+            # If we fail to list comments, continue and attempt to post the
+            # trigger anyway.
+            pass
+
+        log_and_print(
+            self.log,
+            self._console,
+            f"⏳ Triggering pre-commit.ci re-run for {pr_info.repository_full_name}#{pr_info.number} [status never reported]",
+            level="info",
+        )
+
+        try:
+            await self._github_client.post_issue_comment(
+                repo_owner, repo_name, pr_info.number, "pre-commit.ci run"
+            )
+        except Exception as e:
+            self.log.warning(
+                f"Failed to post pre-commit.ci trigger comment on "
+                f"{pr_info.repository_full_name}#{pr_info.number}: {e}"
+            )
+            return False
+
+        # 4. Poll for the status to appear (up to ~30 seconds)
+        # Keep this short to avoid stalling merge workers — if pre-commit.ci
+        # hasn't responded yet, the next run will pick it up.
+        max_polls = 6  # 6 × 5s = 30s
+        for attempt in range(max_polls):
+            await asyncio.sleep(5.0)
+            try:
+                status_data = await self._github_client.get(
+                    f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/status"
+                )
+                if isinstance(status_data, dict):
+                    for s in status_data.get("statuses", []):
+                        if not isinstance(s, dict):
+                            continue
+                        if s.get("context") != precommit_context:
+                            continue
+                        state = s.get("state")
+                        if state == "success":
+                            log_and_print(
+                                self.log,
+                                self._console,
+                                f"✅ pre-commit.ci passed for {pr_info.repository_full_name}#{pr_info.number}",
+                                level="info",
+                            )
+                            return True
+                        elif state in ("failure", "error"):
+                            log_and_print(
+                                self.log,
+                                self._console,
+                                f"❌ pre-commit.ci failed for {pr_info.repository_full_name}#{pr_info.number}",
+                                level="warning",
+                            )
+                            return False
+                        # state == "pending" — keep polling
+            except Exception as e:
+                self.log.debug(
+                    "Failed to poll pre-commit.ci status for %s: %s",
+                    f"{pr_info.repository_full_name}#{pr_info.number}",
+                    e,
+                )
+
+            if attempt == max_polls - 1:
+                self.log.debug(
+                    f"Still waiting for pre-commit.ci on "
+                    f"{pr_info.repository_full_name}#{pr_info.number} "
+                    f"({(attempt + 1) * 5}s elapsed)"
+                )
+
+        self.log.warning(
+            f"Timed out waiting for pre-commit.ci on "
+            f"{pr_info.repository_full_name}#{pr_info.number}"
+        )
+        return False
 
     async def _approve_pr(self, owner: str, repo: str, pr_number: int) -> bool:
         """

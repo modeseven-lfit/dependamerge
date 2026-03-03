@@ -824,6 +824,189 @@ class GitHubAsync:
             self.log.debug(f"Could not fetch review comments for PR {number}: {e}")
             return []
 
+    async def post_issue_comment(
+        self, owner: str, repo: str, number: int, body: str
+    ) -> dict[str, Any]:
+        """
+        Post a comment on an issue or pull request.
+
+        REST: POST /repos/{owner}/{repo}/issues/{issue_number}/comments
+
+        Raises:
+            PermissionError: If token lacks required permissions
+        """
+        try:
+            data = await self.post(
+                f"/repos/{owner}/{repo}/issues/{number}/comments",
+                json={"body": body},
+            )
+        except Exception as e:
+            perm_error = self._parse_permission_error(
+                e, f"post a comment on issue or pull request #{number}", owner, repo
+            )
+            if perm_error:
+                raise perm_error from e
+            raise
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _ruleset_applies_to_branch(
+        conditions: dict[str, Any],
+        branch: str,
+        default_branch: str | None = None,
+    ) -> bool:
+        """Check whether a ruleset's ref_name conditions match *branch*.
+
+        Ruleset conditions use ``conditions.ref_name.include`` /
+        ``conditions.ref_name.exclude`` arrays.  Recognised patterns:
+
+        * ``~DEFAULT_BRANCH`` — matches when *branch* equals *default_branch*.
+          If *default_branch* is not supplied, the match is treated as
+          ``True`` (conservative) to avoid silently filtering out rulesets
+          for repos whose default branch is something other than
+          ``main``/``master``.
+        * ``~ALL``            — matches every branch.
+        * ``refs/heads/<name>`` — exact ref match.
+        * Bare branch name   — treated as ``refs/heads/<name>``.
+
+        If the conditions dict is empty or missing ``ref_name`` the
+        ruleset is assumed to apply (conservative).
+        """
+        import fnmatch
+
+        ref_name = conditions.get("ref_name", {})
+        if not isinstance(ref_name, dict):
+            return True  # No conditions — assume applies
+
+        include = ref_name.get("include", [])
+        exclude = ref_name.get("exclude", [])
+
+        full_ref = f"refs/heads/{branch}"
+
+        def _matches(pattern: str) -> bool:
+            if pattern == "~ALL":
+                return True
+            if pattern == "~DEFAULT_BRANCH":
+                if default_branch is None:
+                    # Unknown default branch — conservatively assume match
+                    return True
+                return branch == default_branch
+            # Normalise bare branch names to full refs
+            pat = pattern if pattern.startswith("refs/") else f"refs/heads/{pattern}"
+            return fnmatch.fnmatchcase(full_ref, pat)
+
+        # Must match at least one include pattern (if any are specified)
+        if include and not any(_matches(p) for p in include if isinstance(p, str)):
+            return False
+
+        # Must not match any exclude pattern
+        if any(_matches(p) for p in exclude if isinstance(p, str)):
+            return False
+
+        return True
+
+    async def get_required_status_checks(
+        self, owner: str, repo: str, branch: str
+    ) -> list[dict[str, Any]]:
+        """
+        Get required status checks for a branch by inspecting rulesets.
+
+        Only rulesets whose ``conditions.ref_name`` patterns match *branch*
+        are considered.  Falls back to branch protection rules if rulesets
+        are not available.
+        Returns a list of dicts with 'context' and optionally 'integration_id'.
+        Results are deduplicated by ``context``.
+        """
+        required_checks: list[dict[str, Any]] = []
+        seen_contexts: set[str] = set()
+
+        # Resolve the repo's actual default branch so that ~DEFAULT_BRANCH
+        # ruleset conditions are evaluated correctly (not hardcoded to
+        # main/master).
+        default_branch: str | None = None
+        try:
+            repo_data = await self.get(f"/repos/{owner}/{repo}")
+            if isinstance(repo_data, dict):
+                default_branch = repo_data.get("default_branch")
+        except Exception:
+            pass  # Will fall through to conservative matching
+
+        # Try rulesets first (org-level and repo-level)
+        try:
+            rulesets = await self.get(
+                f"/repos/{owner}/{repo}/rulesets?per_page=100"
+            )
+            if isinstance(rulesets, list):
+                for ruleset in rulesets:
+                    if not isinstance(ruleset, dict):
+                        continue
+                    ruleset_id = ruleset.get("id")
+                    if not ruleset_id:
+                        continue
+                    # Fetch full ruleset details to get the rules
+                    try:
+                        detail = await self.get(
+                            f"/repos/{owner}/{repo}/rulesets/{ruleset_id}"
+                        )
+                        if not isinstance(detail, dict):
+                            continue
+
+                        # Filter: skip rulesets that do not target this branch
+                        conditions = detail.get("conditions", {})
+                        if isinstance(
+                            conditions, dict
+                        ) and not self._ruleset_applies_to_branch(
+                            conditions, branch, default_branch
+                        ):
+                            self.log.debug(
+                                f"Ruleset {ruleset_id} does not apply to branch '{branch}'; skipping"
+                            )
+                            continue
+
+                        for rule in detail.get("rules", []):
+                            if not isinstance(rule, dict):
+                                continue
+                            if rule.get("type") == "required_status_checks":
+                                params = rule.get("parameters", {})
+                                for check in params.get(
+                                    "required_status_checks", []
+                                ):
+                                    if isinstance(check, dict) and check.get(
+                                        "context"
+                                    ):
+                                        ctx = check["context"]
+                                        if ctx not in seen_contexts:
+                                            seen_contexts.add(ctx)
+                                            required_checks.append(check)
+                    except Exception as detail_err:
+                        self.log.debug(
+                            f"Could not fetch ruleset {ruleset_id} details: {detail_err}"
+                        )
+        except Exception as e:
+            self.log.debug(f"Could not fetch rulesets for {owner}/{repo}: {e}")
+
+        # Fall back to branch protection if no ruleset checks found
+        if not required_checks:
+            try:
+                data = await self.get(
+                    f"/repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks"
+                )
+                if isinstance(data, dict):
+                    for ctx in data.get("contexts", []):
+                        if ctx not in seen_contexts:
+                            seen_contexts.add(ctx)
+                            required_checks.append({"context": ctx})
+                    for check in data.get("checks", []):
+                        if isinstance(check, dict) and check.get("context"):
+                            ctx = check["context"]
+                            if ctx not in seen_contexts:
+                                seen_contexts.add(ctx)
+                                required_checks.append(check)
+            except Exception:
+                pass
+
+        return required_checks
+
     async def get_branch_protection(
         self, owner: str, repo: str, branch: str
     ) -> dict[str, Any]:
@@ -1133,6 +1316,11 @@ class GitHubAsync:
 
         # Check runs and status contexts - look for failing (check this first as it's most specific)
         failing_checks = []
+        completed_check_names: set[str] = set()
+        # Track all reported check names regardless of status so that
+        # queued/in_progress checks are not misclassified as "missing".
+        reported_check_names: set[str] = set()
+        pending_check_names: set[str] = set()
         try:
             # Check runs (newer GitHub Apps API)
             runs = await self.get(
@@ -1142,9 +1330,16 @@ class GitHubAsync:
                 for run in runs.get("check_runs") or []:
                     if not isinstance(run, dict):
                         continue
+                    name = run.get("name", "unknown")
+                    status = run.get("status")
                     conclusion = run.get("conclusion")
+                    reported_check_names.add(name)
+                    if status == "completed":
+                        completed_check_names.add(name)
+                    elif status in ("queued", "in_progress"):
+                        pending_check_names.add(name)
                     if conclusion in ["failure", "cancelled", "timed_out"]:
-                        failing_checks.append(run.get("name", "unknown"))
+                        failing_checks.append(name)
         except Exception:
             pass
 
@@ -1154,17 +1349,52 @@ class GitHubAsync:
                 f"/repos/{owner}/{repo}/commits/{head_sha}/status"
             )
             if isinstance(statuses, dict):
-                for status in statuses.get("statuses") or []:
-                    if not isinstance(status, dict):
+                for s in statuses.get("statuses") or []:
+                    if not isinstance(s, dict):
                         continue
-                    state = status.get("state")
+                    context = s.get("context", "unknown")
+                    state = s.get("state")
+                    reported_check_names.add(context)
+                    if state in ["success", "neutral"]:
+                        completed_check_names.add(context)
+                    elif state == "pending":
+                        pending_check_names.add(context)
                     if state in ["failure", "error"]:
-                        context = status.get("context", "unknown")
                         # Avoid duplicates if both check-run and status exist for same service
                         if context not in failing_checks:
                             failing_checks.append(context)
         except Exception:
             pass
+
+        # Detect missing/pending required status checks (e.g. stale pre-commit.ci)
+        missing_required_checks: list[str] = []
+        pending_required_checks: list[str] = []
+        try:
+            # Determine the base branch for this PR
+            pr_data = await self.get(f"/repos/{owner}/{repo}/pulls/{number}")
+            base_branch = (
+                pr_data.get("base", {}).get("ref", "main")
+                if isinstance(pr_data, dict)
+                else "main"
+            )
+            required_checks = await self.get_required_status_checks(
+                owner, repo, base_branch
+            )
+            for check in required_checks:
+                ctx = check.get("context", "")
+                if not ctx:
+                    continue
+                if ctx in reported_check_names:
+                    # Check has been reported — distinguish pending from completed
+                    if ctx not in completed_check_names and ctx in pending_check_names:
+                        pending_required_checks.append(ctx)
+                else:
+                    # Never reported via either API — truly missing
+                    missing_required_checks.append(ctx)
+        except Exception as req_err:
+            self.log.debug(
+                f"Could not check required status checks for {owner}/{repo}#{number}: {req_err}"
+            )
 
         # Prioritize blocking conditions by specificity
         # Most specific blockers first
@@ -1173,6 +1403,20 @@ class GitHubAsync:
                 return f"Blocked by failing check: {failing_checks[0]}"
             else:
                 return f"Blocked by {len(failing_checks)} failing checks"
+
+        if missing_required_checks:
+            if len(missing_required_checks) == 1:
+                return f"Blocked by missing required status: {missing_required_checks[0]}"
+            else:
+                names = ", ".join(missing_required_checks)
+                return f"Blocked by {len(missing_required_checks)} missing required statuses: {names}"
+
+        if pending_required_checks:
+            if len(pending_required_checks) == 1:
+                return f"Blocked by pending required check: {pending_required_checks[0]}"
+            else:
+                names = ", ".join(pending_required_checks)
+                return f"Blocked by {len(pending_required_checks)} pending required checks: {names}"
 
         if human_changes_requested:
             return "Human reviewer requested changes"
