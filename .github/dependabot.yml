@@ -18,3 +18,5 @@ updates:
     commit-message:
       prefix: "Chore"
     open-pull-requests-limit: 15
+    exclude-paths:
+      - "LICENSES/**"
