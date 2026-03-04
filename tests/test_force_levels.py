@@ -457,10 +457,17 @@ class TestForceLogging:
                 return {
                     "mergeable": False,
                     "mergeable_state": "blocked",
+                    "head": {"sha": "abc123"},
                 }
             return {}
 
         mock_github.get.side_effect = mock_get_side_effect
+
+        # Mock analyze_block_reason to return a non-approval blocker
+        # (e.g. failing checks) so the force-level bypass path is exercised
+        mock_github.analyze_block_reason.return_value = (
+            "Blocked by failing check: ci/test"
+        )
 
         async with AsyncMergeManager(
             token="fake_token",
