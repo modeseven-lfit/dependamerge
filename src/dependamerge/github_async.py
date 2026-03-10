@@ -849,6 +849,193 @@ class GitHubAsync:
             raise
         return data if isinstance(data, dict) else {}
 
+    async def check_pr_commit_signatures(
+        self, owner: str, repo: str, number: int
+    ) -> tuple[bool, list[str]]:
+        """
+        Check whether all commits on a pull request have verified signatures.
+
+        REST: GET /repos/{owner}/{repo}/pulls/{pull_number}/commits
+
+        Returns:
+            Tuple of (all_verified: bool, unverified_shas: list[str]).
+            ``all_verified`` is True when every commit carries a valid
+            signature according to GitHub.  ``unverified_shas`` contains
+            the abbreviated SHAs of any commits whose verification failed.
+        """
+        unverified: list[str] = []
+        try:
+            commits = await self.get(
+                f"/repos/{owner}/{repo}/pulls/{number}/commits?per_page=100"
+            )
+            if not isinstance(commits, list):
+                # Unexpected response shape – assume OK to avoid false positives
+                return True, []
+
+            for commit_data in commits:
+                if not isinstance(commit_data, dict):
+                    continue
+                raw_sha = commit_data.get("sha")
+                sha = str(raw_sha)[:8] if isinstance(raw_sha, str) else "unknown"
+                commit_obj = commit_data.get("commit")
+                if not isinstance(commit_obj, dict):
+                    unverified.append(sha)
+                    continue
+                verification = commit_obj.get("verification")
+                if not isinstance(verification, dict):
+                    unverified.append(sha)
+                    continue
+                if not verification.get("verified", False):
+                    unverified.append(sha)
+
+            all_verified = len(unverified) == 0
+            return all_verified, unverified
+        except Exception as e:
+            self.log.debug(
+                "Failed to check commit signatures for PR %s/%s#%s: %s",
+                owner,
+                repo,
+                number,
+                e,
+            )
+            # On error, assume verified to avoid blocking merges unnecessarily
+            return True, []
+
+    async def requires_commit_signatures(
+        self, owner: str, repo: str, branch: str = "main"
+    ) -> bool:
+        """
+        Check whether a branch requires signed (verified) commits.
+
+        Uses two complementary sources:
+
+        1. **Classic branch protection** – the ``required_signatures``
+           sub-resource of the branch protection REST endpoint.
+        2. **Repository rulesets** (newer API) – any active ruleset that
+           targets the given branch and contains a ``required_signatures``
+           rule.
+
+        Returns:
+            True if signed commits are required by *either* mechanism.
+        """
+        # --- 1. Classic branch protection ---
+        try:
+            # The signatures endpoint returns 200 with {"enabled": true/false}
+            # or 404 when branch protection / signature requirement is absent.
+            sig_data = await self.get(
+                f"/repos/{owner}/{repo}/branches/{branch}/protection/required_signatures"
+            )
+            if isinstance(sig_data, dict) and sig_data.get("enabled"):
+                self.log.debug(
+                    "Branch %s/%s:%s requires commit signatures (classic protection)",
+                    owner,
+                    repo,
+                    branch,
+                )
+                return True
+        except Exception as e:
+            # 404 → not enabled; other errors → continue checking rulesets
+            if "404" not in str(e):
+                self.log.debug(
+                    "Error checking classic signature requirement for "
+                    "%s/%s:%s: %s",
+                    owner,
+                    repo,
+                    branch,
+                    e,
+                )
+
+        # --- 2. Repository rulesets ---
+        try:
+            # Resolve the repo's actual default branch so that
+            # ~DEFAULT_BRANCH ruleset conditions are evaluated correctly.
+            default_branch: str | None = None
+            try:
+                repo_data = await self.get(f"/repos/{owner}/{repo}")
+                if isinstance(repo_data, dict):
+                    default_branch = repo_data.get("default_branch")
+            except Exception:
+                pass  # Will fall through to conservative matching
+
+            # Paginate through all rulesets to collect their IDs.
+            # The list endpoint may not include full rules/conditions,
+            # so we fetch each ruleset's detail individually (matching
+            # the pattern in get_required_status_checks).
+            ruleset_ids: list[int] = []
+            page = 1
+            per_page = 100
+            while True:
+                page_rulesets = await self.get(
+                    f"/repos/{owner}/{repo}/rulesets?per_page={per_page}&page={page}"
+                )
+                if not isinstance(page_rulesets, list) or not page_rulesets:
+                    break
+                for rs in page_rulesets:
+                    if isinstance(rs, dict):
+                        rs_id = rs.get("id")
+                        if rs_id is not None:
+                            ruleset_ids.append(int(rs_id))
+                if len(page_rulesets) < per_page:
+                    break
+                page += 1
+
+            for ruleset_id in ruleset_ids:
+                try:
+                    detail = await self.get(
+                        f"/repos/{owner}/{repo}/rulesets/{ruleset_id}"
+                    )
+                    if not isinstance(detail, dict):
+                        continue
+                except Exception as detail_err:
+                    self.log.debug(
+                        "Could not fetch ruleset %s for %s/%s: %s",
+                        ruleset_id,
+                        owner,
+                        repo,
+                        detail_err,
+                    )
+                    continue
+
+                # Only consider active rulesets
+                if detail.get("enforcement") != "active":
+                    continue
+                # Check if this ruleset applies to our branch
+                conditions = detail.get("conditions", {})
+                if isinstance(
+                    conditions, dict
+                ) and not self._ruleset_applies_to_branch(
+                    conditions, branch, default_branch
+                ):
+                    continue
+                # Check for required_signatures rule
+                rules = detail.get("rules", [])
+                if isinstance(rules, list):
+                    for rule in rules:
+                        if (
+                            isinstance(rule, dict)
+                            and rule.get("type") == "required_signatures"
+                        ):
+                            self.log.debug(
+                                "Branch %s/%s:%s requires commit "
+                                "signatures (ruleset: %s)",
+                                owner,
+                                repo,
+                                branch,
+                                detail.get("name", "unknown"),
+                            )
+                            return True
+        except Exception as e:
+            self.log.debug(
+                "Error checking rulesets for signature requirement on "
+                "%s/%s:%s: %s",
+                owner,
+                repo,
+                branch,
+                e,
+            )
+
+        return False
+
     @staticmethod
     def _ruleset_applies_to_branch(
         conditions: dict[str, Any],
