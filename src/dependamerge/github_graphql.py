@@ -321,6 +321,7 @@ query GetBranchProtection($owner: String!, $name: String!, $branch: String!) {
     ref(qualifiedName: $branch) {
       branchProtectionRule {
         requiresLinearHistory
+        requiresCommitSignatures
         requiredStatusCheckContexts
         requiresStatusChecks
         requiresApprovingReviews
