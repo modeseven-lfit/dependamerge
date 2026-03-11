@@ -608,19 +608,86 @@ class AsyncMergeManager:
                         level="debug",
                     )
                 else:
-                    result.status = MergeStatus.FAILED
-                    result.error = "Failed to merge after all retry attempts"
-                    if self.progress_tracker:
-                        self.progress_tracker.merge_failure()
-                    # Single line summary for failed merge with reason
+                    # Compute failure summary once — used for both the
+                    # recreate decision and the final error reporting.
                     failure_reason = self._get_failure_summary(pr_info)
-                    # Log error separately to avoid duplicate console output
-                    self.log.error(
-                        f"Failed to merge PR {pr_info.repository_full_name}#{pr_info.number}: {failure_reason}"
-                    )
-                    self._console.print(
-                        f"❌ Failed: {pr_info.html_url} [{failure_reason}]"
-                    )
+
+                    # Before giving up, check if this is a dependabot PR
+                    # that failed due to unsigned commits.  If so, ask
+                    # dependabot to recreate the PR and merge the new one.
+                    recreated_pr = None
+                    if (
+                        pr_info.author == "dependabot[bot]"
+                        and not self.preview_mode
+                    ):
+                        if "branch protection" in failure_reason.lower():
+                            recreated_pr = (
+                                await self._trigger_dependabot_recreate(pr_info)
+                            )
+
+                    if recreated_pr is not None:
+                        # We have a fresh PR — approve and merge it
+                        new_owner, new_repo = recreated_pr.repository_full_name.split("/", 1)
+                        await self._approve_pr(new_owner, new_repo, recreated_pr.number)
+
+                        new_merge_method = self._pr_merge_methods.get(
+                            f"{new_owner}/{new_repo}", self.default_merge_method
+                        )
+                        try:
+                            if self._github_client is None:
+                                raise RuntimeError("GitHub client not initialized")
+                            new_merged = await self._github_client.merge_pull_request(
+                                new_owner, new_repo, recreated_pr.number, new_merge_method
+                            )
+                        except Exception as merge_err:
+                            self.log.error(
+                                "Failed to merge recreated PR %s#%s: %s",
+                                recreated_pr.repository_full_name,
+                                recreated_pr.number,
+                                merge_err,
+                            )
+                            new_merged = False
+
+                        if new_merged:
+                            result.status = MergeStatus.MERGED
+                            result.pr_info = recreated_pr
+                            if self.progress_tracker:
+                                self.progress_tracker.merge_success()
+                            log_and_print(
+                                self.log,
+                                self._console,
+                                f"✅ Merged (recreated): {recreated_pr.html_url}",
+                                level="debug",
+                            )
+                        else:
+                            result.status = MergeStatus.FAILED
+                            result.error = (
+                                f"Dependabot recreated PR #{recreated_pr.number} "
+                                "but merge still failed"
+                            )
+                            if self.progress_tracker:
+                                self.progress_tracker.merge_failure()
+                            self.log.error(
+                                "Failed to merge recreated PR %s#%s",
+                                recreated_pr.repository_full_name,
+                                recreated_pr.number,
+                            )
+                            self._console.print(
+                                f"❌ Failed: {recreated_pr.html_url} "
+                                "[recreated PR merge failed]"
+                            )
+                    else:
+                        result.status = MergeStatus.FAILED
+                        result.error = "Failed to merge after all retry attempts"
+                        if self.progress_tracker:
+                            self.progress_tracker.merge_failure()
+                        # Log error separately to avoid duplicate console output
+                        self.log.error(
+                            f"Failed to merge PR {pr_info.repository_full_name}#{pr_info.number}: {failure_reason}"
+                        )
+                        self._console.print(
+                            f"❌ Failed: {pr_info.html_url} [{failure_reason}]"
+                        )
 
         except GitHubPermissionError as e:
             # Handle permission errors with detailed guidance
@@ -1064,6 +1131,368 @@ class AsyncMergeManager:
             f"{pr_info.repository_full_name}#{pr_info.number}"
         )
         return False
+
+    async def _trigger_dependabot_recreate(
+        self, pr_info: PullRequestInfo
+    ) -> PullRequestInfo | None:
+        """
+        Detect an unsigned dependabot commit and ask dependabot to recreate
+        the pull request so that the new commit is properly signed.
+
+        When a repository's branch protection requires commit signatures,
+        dependabot PRs can end up with unverified commits (e.g. after a
+        rebase or force-push by GitHub).  Posting ``@dependabot recreate``
+        causes dependabot to close the current PR and open a fresh one
+        whose commit is signed by GitHub.
+
+        Args:
+            pr_info: Pull request information for the failing PR.
+
+        Returns:
+            A new ``PullRequestInfo`` for the recreated PR if the recreate
+            was triggered, the old PR was closed, and a replacement was
+            found.  Returns ``None`` if the recreate was not applicable or
+            did not succeed within the polling window.
+        """
+        if not self._github_client:
+            return None
+
+        repo_owner, repo_name = pr_info.repository_full_name.split("/", 1)
+
+        # 1. Only applies to dependabot PRs
+        if pr_info.author != "dependabot[bot]":
+            return None
+
+        # 2. Check whether the branch requires signed commits
+        try:
+            requires_signatures = await self._github_client.requires_commit_signatures(
+                repo_owner, repo_name, pr_info.base_branch or "main"
+            )
+            if not requires_signatures:
+                self.log.debug(
+                    "Branch %s/%s:%s does not require commit signatures; "
+                    "skipping dependabot recreate.",
+                    repo_owner,
+                    repo_name,
+                    pr_info.base_branch or "main",
+                )
+                return None
+        except Exception as e:
+            self.log.debug(
+                "Could not determine signature requirement for %s: %s",
+                pr_info.repository_full_name,
+                e,
+            )
+            return None
+
+        # 3. Check whether any commits are unverified
+        try:
+            all_verified, unverified_shas = (
+                await self._github_client.check_pr_commit_signatures(
+                    repo_owner, repo_name, pr_info.number
+                )
+            )
+            if all_verified:
+                self.log.debug(
+                    "All commits on %s#%s are verified; recreate not needed.",
+                    pr_info.repository_full_name,
+                    pr_info.number,
+                )
+                return None
+        except Exception as e:
+            self.log.debug(
+                "Could not check commit signatures for %s#%s: %s",
+                pr_info.repository_full_name,
+                pr_info.number,
+                e,
+            )
+            return None
+
+        # 4. Guard against duplicate recreate comments
+        try:
+            comments = await self._github_client.get(
+                f"/repos/{repo_owner}/{repo_name}/issues/{pr_info.number}/comments"
+                f"?per_page=100&direction=desc"
+            )
+            if isinstance(comments, list):
+                for c in comments:
+                    if not isinstance(c, dict):
+                        continue
+                    body = c.get("body")
+                    if isinstance(body, str) and "@dependabot recreate" in body:
+                        self.log.info(
+                            "Found existing @dependabot recreate comment on "
+                            "%s#%s; skipping duplicate.",
+                            pr_info.repository_full_name,
+                            pr_info.number,
+                        )
+                        return None
+        except Exception as e:
+            self.log.warning(
+                "Could not list comments for %s#%s to check for existing "
+                "@dependabot recreate comment: %s",
+                pr_info.repository_full_name,
+                pr_info.number,
+                e,
+            )
+            return None
+
+        # 5. Post the recreate comment
+        log_and_print(
+            self.log,
+            self._console,
+            f"🔄 Requesting dependabot recreate for {pr_info.repository_full_name}#{pr_info.number} "
+            f"[unverified commits: {', '.join(unverified_shas)}]",
+            level="info",
+        )
+
+        try:
+            await self._github_client.post_issue_comment(
+                repo_owner, repo_name, pr_info.number, "@dependabot recreate"
+            )
+        except Exception as e:
+            self.log.warning(
+                "Failed to post @dependabot recreate comment on %s#%s: %s",
+                pr_info.repository_full_name,
+                pr_info.number,
+                e,
+            )
+            return None
+
+        # 6. Poll for the old PR to close and a replacement to appear.
+        #    Dependabot typically responds within 30-90 seconds.
+        #    We poll for up to ~3 minutes (36 × 5s = 180s).
+        max_polls = 36
+        old_pr_closed = False
+
+        for attempt in range(max_polls):
+            await asyncio.sleep(5.0)
+
+            # 6a. Check if the old PR has been closed
+            if not old_pr_closed:
+                try:
+                    old_pr_data = await self._github_client.get(
+                        f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}"
+                    )
+                    if isinstance(old_pr_data, dict):
+                        if old_pr_data.get("state") == "closed":
+                            old_pr_closed = True
+                            log_and_print(
+                                self.log,
+                                self._console,
+                                f"✅ Old PR {pr_info.repository_full_name}#{pr_info.number} "
+                                f"closed by dependabot ({(attempt + 1) * 5}s elapsed)",
+                                level="info",
+                            )
+                except Exception as e:
+                    self.log.debug(
+                        "Error polling old PR state for %s#%s: %s",
+                        pr_info.repository_full_name,
+                        pr_info.number,
+                        e,
+                    )
+
+            # 6b. Once the old PR is closed, look for the replacement
+            if old_pr_closed:
+                try:
+                    # Search for open PRs from dependabot on the same head branch
+                    prs = await self._github_client.get(
+                        f"/repos/{repo_owner}/{repo_name}/pulls"
+                        f"?state=open&head={repo_owner}:{pr_info.head_branch}&per_page=5"
+                    )
+                    if isinstance(prs, list):
+                        for pr_data in prs:
+                            if not isinstance(pr_data, dict):
+                                continue
+                            pr_author = (
+                                pr_data.get("user", {}).get("login", "")
+                            )
+                            if pr_author != "dependabot[bot]":
+                                continue
+
+                            new_number = pr_data.get("number")
+                            if new_number is None or new_number == pr_info.number:
+                                continue
+
+                            # Verify the replacement targets the same base branch
+                            new_base = pr_data.get("base", {}).get("ref", "")
+                            if new_base != (pr_info.base_branch or "main"):
+                                self.log.debug(
+                                    "Skipping candidate PR #%s: targets %s, "
+                                    "expected %s",
+                                    new_number,
+                                    new_base,
+                                    pr_info.base_branch or "main",
+                                )
+                                continue
+
+                            # Found a replacement — now wait for checks to pass
+                            new_pr_info = await self._wait_for_recreated_pr_checks(
+                                repo_owner, repo_name, new_number, pr_data
+                            )
+                            # Always return after the first wait attempt to avoid
+                            # performing multiple long waits for the same PR.
+                            return new_pr_info
+                except Exception as e:
+                    self.log.debug(
+                        "Error searching for replacement PR for %s#%s: %s",
+                        pr_info.repository_full_name,
+                        pr_info.number,
+                        e,
+                    )
+
+            if attempt % 6 == 5:
+                self.log.debug(
+                    "Still waiting for dependabot recreate on %s#%s (%ds elapsed, old_pr_closed=%s)",
+                    pr_info.repository_full_name,
+                    pr_info.number,
+                    (attempt + 1) * 5,
+                    old_pr_closed,
+                )
+
+        self.log.warning(
+            "Timed out waiting for dependabot to recreate %s#%s",
+            pr_info.repository_full_name,
+            pr_info.number,
+        )
+        return None
+
+    async def _wait_for_recreated_pr_checks(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        new_number: int,
+        pr_data: dict[str, Any],
+    ) -> PullRequestInfo | None:
+        """
+        Wait for the recreated PR's status checks to complete.
+
+        Polls up to ~3 minutes for the new PR to reach a mergeable state.
+
+        Args:
+            repo_owner: Repository owner.
+            repo_name: Repository name.
+            new_number: The PR number of the recreated pull request.
+            pr_data: The initial PR data dict from the GitHub API.
+
+        Returns:
+            A ``PullRequestInfo`` if the PR became mergeable, None on timeout.
+        """
+        if not self._github_client:
+            return None
+
+        full_name = f"{repo_owner}/{repo_name}"
+        html_url = pr_data.get("html_url", f"https://github.com/{full_name}/pull/{new_number}")
+
+        log_and_print(
+            self.log,
+            self._console,
+            f"🔍 Found recreated PR {full_name}#{new_number}, waiting for checks...",
+            level="info",
+        )
+
+        # Poll for the new PR to become mergeable (up to ~3 minutes)
+        max_check_polls = 36  # 36 × 5s = 180s
+        for check_attempt in range(max_check_polls):
+            await asyncio.sleep(5.0)
+            try:
+                refreshed = await self._github_client.get(
+                    f"/repos/{repo_owner}/{repo_name}/pulls/{new_number}"
+                )
+                if not isinstance(refreshed, dict):
+                    continue
+
+                mergeable = refreshed.get("mergeable")
+                mergeable_state = refreshed.get("mergeable_state")
+
+                if mergeable_state == "clean" or (
+                    mergeable is True and mergeable_state in ("clean", "unstable")
+                ):
+                    log_and_print(
+                        self.log,
+                        self._console,
+                        f"✅ Recreated PR {full_name}#{new_number} is ready to merge",
+                        level="info",
+                    )
+                    # Build a PullRequestInfo for the new PR
+                    from .models import FileChange
+
+                    files_changed: list[FileChange] = []
+                    try:
+                        async for files_data in self._github_client.get_paginated(
+                            f"/repos/{repo_owner}/{repo_name}/pulls/{new_number}/files",
+                            per_page=100,
+                        ):
+                            if isinstance(files_data, list):
+                                for f in files_data:
+                                    if isinstance(f, dict):
+                                        files_changed.append(
+                                            FileChange(
+                                                filename=f.get("filename", ""),
+                                                additions=int(f.get("additions", 0)),
+                                                deletions=int(f.get("deletions", 0)),
+                                                changes=int(f.get("changes", 0)),
+                                                status=f.get("status", "modified"),
+                                            )
+                                        )
+                    except Exception as e:
+                        self.log.debug(
+                            "Failed to fetch files for recreated PR %s#%s: %s",
+                            f"{repo_owner}/{repo_name}",
+                            new_number,
+                            e,
+                        )
+
+                    return PullRequestInfo(
+                        number=new_number,
+                        title=refreshed.get("title", ""),
+                        body=refreshed.get("body"),
+                        author=(refreshed.get("user", {}).get("login", "")),
+                        head_sha=(refreshed.get("head", {}).get("sha", "")),
+                        base_branch=(refreshed.get("base", {}).get("ref", "")),
+                        head_branch=(refreshed.get("head", {}).get("ref", "")),
+                        state=refreshed.get("state", "open"),
+                        mergeable=mergeable,
+                        mergeable_state=mergeable_state,
+                        behind_by=None,
+                        files_changed=files_changed,
+                        repository_full_name=full_name,
+                        html_url=html_url,
+                    )
+
+                if mergeable_state == "dirty":
+                    self.log.warning(
+                        "Recreated PR %s#%s has merge conflicts; aborting wait.",
+                        full_name,
+                        new_number,
+                    )
+                    return None
+
+                # blocked / behind / unknown — keep polling
+                if check_attempt % 6 == 5:
+                    self.log.debug(
+                        "Waiting for checks on recreated PR %s#%s "
+                        "(state=%s, %ds elapsed)",
+                        full_name,
+                        new_number,
+                        mergeable_state,
+                        (check_attempt + 1) * 5,
+                    )
+
+            except Exception as e:
+                self.log.debug(
+                    "Error polling recreated PR %s#%s: %s",
+                    full_name,
+                    new_number,
+                    e,
+                )
+
+        self.log.warning(
+            "Timed out waiting for checks on recreated PR %s#%s",
+            full_name,
+            new_number,
+        )
+        return None
 
     async def _approve_pr(self, owner: str, repo: str, pr_number: int) -> bool:
         """
