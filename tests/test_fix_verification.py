@@ -106,6 +106,9 @@ def test_final_verification():
                 merge_method="merge",
                 token="test_token",
                 force="none",
+                submit_gerrit_changes=False,
+                skip_gerrit_changes=False,
+                ignore_github2gerrit=True,
             )
 
             # Test passes if we reach this point - the merge was successful
