@@ -38,6 +38,7 @@ from .gerrit import (
     create_gerrit_service,
     create_submit_manager,
 )
+
 from .git_ops import GitError
 from .github_async import (
     GitHubAsync,
@@ -566,6 +567,21 @@ def merge(
         "--netrc-optional/--netrc-required",
         help="Whether to fail if .netrc file is not found (default: optional)",
     ),
+    submit_gerrit_changes: bool = typer.Option(
+        False,
+        "--submit-gerrit-changes",
+        help="Explicitly request Gerrit submission for GitHub2Gerrit PRs (already the default when neither --skip-gerrit-changes nor --ignore-github2gerrit is given)",
+    ),
+    skip_gerrit_changes: bool = typer.Option(
+        False,
+        "--skip-gerrit-changes",
+        help="Skip PRs that have GitHub2Gerrit comments instead of merging them",
+    ),
+    ignore_github2gerrit: bool = typer.Option(
+        False,
+        "--ignore-github2gerrit",
+        help="Ignore GitHub2Gerrit comments and merge PRs in GitHub as normal",
+    ),
 ):
     """
     Bulk approve/merge pull requests or Gerrit changes.
@@ -597,6 +613,12 @@ def merge(
 
     For user generated bulk PRs, use the --override flag with SHA hash.
 
+    GitHub2Gerrit handling:
+    By default, PRs with GitHub2Gerrit mapping comments are detected and
+    the corresponding Gerrit changes are submitted (+2 Code-Review + submit).
+    Use --skip-gerrit-changes to skip these PRs, or --ignore-github2gerrit
+    to merge them in GitHub as normal (which may leave orphaned Gerrit changes).
+
     GitHub Force levels:
     - none: Respect all protections
     - code-owners: Bypass code owner review requirements (default)
@@ -611,6 +633,27 @@ def merge(
     .netrc search order: ./netrc, ~/.netrc, ~/_netrc (Windows)
     Use --netrc-file to specify an explicit path.
     """
+    # Validate mutually exclusive GitHub2Gerrit flags
+    g2g_flags_set = sum([submit_gerrit_changes, skip_gerrit_changes, ignore_github2gerrit])
+    if g2g_flags_set > 1:
+        console.print(
+            "❌ Error: --submit-gerrit-changes, --skip-gerrit-changes, and "
+            "--ignore-github2gerrit are mutually exclusive."
+        )
+        raise typer.Exit(1)
+
+    # Determine the effective GitHub2Gerrit mode:
+    # - "submit" (default): detect G2G PRs and submit the Gerrit change
+    # - "skip": detect G2G PRs and skip them
+    # - "ignore": do not check for G2G comments at all
+    if skip_gerrit_changes:
+        github2gerrit_mode = "skip"
+    elif ignore_github2gerrit:
+        github2gerrit_mode = "ignore"
+    else:
+        # Default is "submit" (whether --submit-gerrit-changes was explicit or not)
+        github2gerrit_mode = "submit"
+
     # Configure logging
     # Keep the root logger at WARNING (or INFO) so third-party libraries stay
     # quiet by default.  --verbose only enables DEBUG for the dependamerge
@@ -965,6 +1008,9 @@ def merge(
                 preview_mode=not no_confirm,
                 dismiss_copilot=dismiss_copilot,
                 force_level=force,
+                github2gerrit_mode=github2gerrit_mode,
+                no_netrc=no_netrc,
+                netrc_file=netrc_file,
             ) as merge_manager:
                 if not no_confirm:
                     pass  # No merge message in preview mode
@@ -1039,6 +1085,9 @@ def merge(
                                     preview_mode=False,  # Execute merge
                                     dismiss_copilot=dismiss_copilot,
                                     force_level=force,
+                                    github2gerrit_mode=github2gerrit_mode,
+                                    no_netrc=no_netrc,
+                                    netrc_file=netrc_file,
                                 ) as real_merge_manager:
                                     return await real_merge_manager.merge_prs_parallel(
                                         mergeable_prs
