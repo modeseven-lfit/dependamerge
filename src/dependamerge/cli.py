@@ -1005,7 +1005,7 @@ def merge(
         # Merge PRs in parallel using async merge manager
         async def _merge_parallel():
             async with AsyncMergeManager(
-                token=token,  # type: ignore[reportCallIssue]
+                token=token,  # pyright: ignore[reportArgumentType]
                 merge_method=merge_method,
                 max_retries=MAX_RETRIES,
                 concurrency=10,  # Process up to 10 PRs concurrently
@@ -1082,7 +1082,7 @@ def merge(
                             # Define async function for real merge
                             async def _real_merge():
                                 async with AsyncMergeManager(
-                                    token=token,  # type: ignore[reportCallIssue]
+                                    token=token,  # pyright: ignore[reportArgumentType]
                                     merge_method=merge_method,
                                     max_retries=MAX_RETRIES,
                                     concurrency=10,

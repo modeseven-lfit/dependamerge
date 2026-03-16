@@ -22,11 +22,12 @@ class GitHubClient:
 
     def __init__(self, token: str | None = None):
         """Initialize GitHub client with token."""
-        self.token = token or os.getenv("GITHUB_TOKEN")
-        if not self.token:
+        resolved = token or os.getenv("GITHUB_TOKEN")
+        if not resolved:
             raise ValueError(
                 "GitHub token is required. Set GITHUB_TOKEN environment variable."
             )
+        self.token: str = resolved
 
     def parse_pr_url(self, url: str) -> tuple[str, str, int]:
         """Parse GitHub PR URL to extract owner, repo, and PR number."""

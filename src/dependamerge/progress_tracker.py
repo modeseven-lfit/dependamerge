@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -97,6 +98,7 @@ class ProgressTracker:
                 self.live.start()
         except Exception:
             # Fallback if Rich display fails (e.g., unsupported terminal)
+            self.live = None
             self.rich_available = False
 
     def stop(self) -> None:
@@ -106,6 +108,12 @@ class ProgressTracker:
                 self.live.stop()
             except Exception:
                 pass
+        else:
+            # Non-Rich fallback: emit a final newline so the shell
+            # prompt doesn't appear mid-line after carriage-return
+            # in-place updates.
+            if self._last_display and sys.stdout.isatty():
+                print(flush=True)
         self.live = None
         self.paused = False
 
@@ -131,6 +139,7 @@ class ProgressTracker:
                 if self.live:
                     self.live.start()
             except Exception:
+                self.live = None
                 self.rich_available = False
             self.paused = False
 
@@ -159,6 +168,8 @@ class ProgressTracker:
         """Mark completion of a repository check."""
         self.completed_repositories += 1
         self.unmergeable_prs_found += unmergeable_count
+        self.current_operation = ""
+        self.current_repository = ""
         self._refresh_display()
 
     def update_operation(self, operation: str) -> None:
@@ -292,7 +303,13 @@ class ProgressTracker:
 
         # Only print if display has changed
         if display != self._last_display:
-            print(display)
+            if sys.stdout.isatty():
+                # \033[K clears from cursor to end-of-line so shorter
+                # updates don't leave trailing characters from the
+                # previous render.
+                print(f"\r{display}\033[K", end="", flush=True)
+            else:
+                print(display)
             self._last_display = display
 
     def _format_duration(self, td: timedelta) -> str:
@@ -382,7 +399,9 @@ class MergeProgressTracker(ProgressTracker):
             text.append(f"{progress_pct:.0f}%", style="bold green")
             text.append(")", style="dim")
         else:
-            text.append("🔀 Merging PRs in ", style="bold blue")
+            operation_icon = "🚪" if self.is_close_operation else "🔀"
+            operation_text = "Closing PRs" if self.is_close_operation else "Merging PRs"
+            text.append(f"{operation_icon} {operation_text} in ", style="bold blue")
             text.append(f"{self.organization} ", style="bold cyan")
 
         # Current operation
@@ -510,6 +529,12 @@ class DummyProgressTracker(ProgressTracker):
         pass
 
     def merge_failure(self) -> None:
+        pass
+
+    def _refresh_display(self) -> None:
+        pass
+
+    def _fallback_display(self) -> None:
         pass
 
     def get_summary(self) -> dict[str, Any]:
