@@ -8,11 +8,11 @@ created by the GitHub2Gerrit workflow. It parses the structured mapping comments
 that GitHub2Gerrit posts on PRs to extract Change-IDs, topics, and other
 metadata needed to locate and submit the corresponding Gerrit change.
 
-It also provides a ``.gitreview`` file parser.  Repositories using
-GitHub2Gerrit always contain a ``.gitreview`` at their root that records the
-canonical Gerrit host, port, and project path.  When resolving where to
-submit a change, the ``.gitreview`` file is the **highest-priority** source
-of truth, above environment variables or heuristic comment scraping.
+``.gitreview`` parsing and fetching are delegated to :mod:`dependamerge.gitreview`.
+This module re-exports :class:`~dependamerge.gitreview.GitReviewInfo`,
+:func:`~dependamerge.gitreview.parse_gitreview_text`, and
+:func:`~dependamerge.gitreview.fetch_gitreview_from_github` so that existing
+callers continue to work without import changes.
 
 The mapping comment format is defined by the github2gerrit-action project and
 uses HTML markers for reliable parsing:
@@ -30,12 +30,17 @@ uses HTML markers for reliable parsing:
 
 from __future__ import annotations
 
-import base64
 import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+# Re-export .gitreview symbols so existing callers don't need to change
+# their imports.  The canonical implementation lives in gitreview.py.
+from .gitreview import GitReviewInfo as GitReviewInfo
+from .gitreview import fetch_gitreview_from_github as fetch_gitreview_from_github
+from .gitreview import parse_gitreview_text as parse_gitreview_text
 
 log = logging.getLogger("dependamerge.github2gerrit_detector")
 
@@ -57,125 +62,6 @@ GITHUB2GERRIT_BOT_AUTHORS = frozenset(
         "github-actions[bot]",
     }
 )
-
-# Default Gerrit SSH port (used when .gitreview omits the port= line)
-_DEFAULT_GERRIT_PORT = 29418
-
-# Regex patterns for .gitreview INI-style parsing
-_GITREVIEW_HOST_PATTERN = re.compile(r"(?m)^host=(.+)$")
-_GITREVIEW_PORT_PATTERN = re.compile(r"(?m)^port=(\d+)$")
-_GITREVIEW_PROJECT_PATTERN = re.compile(r"(?m)^project=(.+)$")
-
-
-# ---------------------------------------------------------------------------
-# .gitreview file model and parser
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class GitReviewInfo:
-    """
-    Parsed contents of a ``.gitreview`` file.
-
-    A typical ``.gitreview`` looks like::
-
-        [gerrit]
-        host=gerrit.linuxfoundation.org
-        port=29418
-        project=releng/gerrit_to_platform.git
-
-    Attributes:
-        host: Gerrit server hostname (e.g. ``gerrit.linuxfoundation.org``).
-        port: Gerrit SSH port (default 29418; not used for REST, but kept
-              for completeness).
-        project: Gerrit project path **without** the ``.git`` suffix.
-        base_path: Optional REST API base path derived from well-known
-                   host conventions (e.g. ``"infra"`` for
-                   ``gerrit.linuxfoundation.org``).
-    """
-
-    host: str
-    port: int = _DEFAULT_GERRIT_PORT
-    project: str = ""
-    base_path: str | None = None
-
-    @property
-    def is_valid(self) -> bool:
-        """Minimum validity: host must be present."""
-        return bool(self.host)
-
-
-def parse_gitreview_text(text: str) -> GitReviewInfo | None:
-    """
-    Parse the text content of a ``.gitreview`` file.
-
-    The format is a simple INI-style file (``[gerrit]`` section) with
-    ``host=``, ``port=``, and ``project=`` keys.  This parser mirrors
-    the logic used by ``github2gerrit-action`` for consistency.
-
-    Args:
-        text: Raw text content of a ``.gitreview`` file.
-
-    Returns:
-        A :class:`GitReviewInfo` if at least ``host`` is present,
-        otherwise ``None``.
-    """
-    host_match = _GITREVIEW_HOST_PATTERN.search(text)
-    if not host_match:
-        log.debug(".gitreview: no host= line found")
-        return None
-
-    host = host_match.group(1).strip()
-    if not host:
-        log.debug(".gitreview: host= line is empty")
-        return None
-
-    port_match = _GITREVIEW_PORT_PATTERN.search(text)
-    port = int(port_match.group(1)) if port_match else _DEFAULT_GERRIT_PORT
-
-    project = ""
-    project_match = _GITREVIEW_PROJECT_PATTERN.search(text)
-    if project_match:
-        project = project_match.group(1).strip().removesuffix(".git")
-
-    # Derive base_path from well-known host conventions
-    base_path = _derive_gerrit_base_path(host)
-
-    info = GitReviewInfo(
-        host=host,
-        port=port,
-        project=project,
-        base_path=base_path,
-    )
-    log.debug(
-        "Parsed .gitreview: host=%s, port=%d, project=%s, base_path=%s",
-        info.host,
-        info.port,
-        info.project,
-        info.base_path,
-    )
-    return info
-
-
-def _derive_gerrit_base_path(host: str) -> str | None:
-    """
-    Derive the REST API base path for well-known Gerrit hosts.
-
-    Some Gerrit deployments (notably the Linux Foundation's) serve their
-    REST API and web UI under a sub-path such as ``/infra``.  This
-    function returns the appropriate base path for known hosts.
-
-    Args:
-        host: Gerrit server hostname.
-
-    Returns:
-        Base path string (e.g. ``"infra"``) or ``None`` if unknown.
-    """
-    # Linux Foundation Gerrit uses /infra/ as its base path
-    _KNOWN_BASE_PATHS: dict[str, str] = {
-        "gerrit.linuxfoundation.org": "infra",
-    }
-    return _KNOWN_BASE_PATHS.get(host.lower())
 
 
 class GitHub2GerritMode(str, Enum):
@@ -450,59 +336,8 @@ def build_gerrit_skip_message(
 # ---------------------------------------------------------------------------
 
 
-async def fetch_gitreview_from_github(
-    github_client: Any,
-    owner: str,
-    repo: str,
-    ref: str | None = None,
-) -> GitReviewInfo | None:
-    """
-    Fetch and parse the ``.gitreview`` file from a GitHub repository.
-
-    This uses the GitHub REST API (``GET /repos/{owner}/{repo}/contents/``
-    endpoint) to retrieve the file without needing a local clone.
-
-    Args:
-        github_client: An initialised :class:`GitHubAsync` instance.
-        owner: Repository owner (org or user).
-        repo: Repository name.
-        ref: Optional git ref (branch/tag/SHA) to fetch from.  Defaults
-             to the repository's default branch.
-
-    Returns:
-        A :class:`GitReviewInfo` if the file exists and is parseable,
-        otherwise ``None``.
-    """
-    try:
-        endpoint = f"/repos/{owner}/{repo}/contents/.gitreview"
-        if ref:
-            endpoint += f"?ref={ref}"
-
-        data = await github_client.get(endpoint)
-
-        if not isinstance(data, dict):
-            log.debug(".gitreview API response is not a dict for %s/%s", owner, repo)
-            return None
-
-        # The contents API returns base64-encoded content
-        content_b64 = data.get("content", "")
-        if not content_b64:
-            log.debug(".gitreview has no content for %s/%s", owner, repo)
-            return None
-
-        text = base64.b64decode(content_b64).decode("utf-8")
-        return parse_gitreview_text(text)
-
-    except Exception as exc:
-        # 404 (file not found) is expected for repos without .gitreview
-        exc_str = str(exc)
-        if "404" in exc_str or "Not Found" in exc_str:
-            log.debug("No .gitreview file in %s/%s", owner, repo)
-        else:
-            log.debug(
-                "Failed to fetch .gitreview from %s/%s: %s", owner, repo, exc
-            )
-        return None
+# NOTE: fetch_gitreview_from_github is re-exported at the top of this
+# module from dependamerge.gitreview — no inline implementation needed.
 
 
 # ---------------------------------------------------------------------------
