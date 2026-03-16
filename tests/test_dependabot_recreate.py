@@ -22,16 +22,17 @@ Covers:
 """
 
 from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from dependamerge.github_async import GitHubAsync
-from dependamerge.merge_manager import AsyncMergeManager, MergeStatus
+from dependamerge.merge_manager import MergeStatus
 from dependamerge.models import PullRequestInfo
 
 
-async def _async_gen(*pages) -> AsyncIterator:
+async def _async_gen(*pages) -> AsyncIterator[list[Any]]:
     """Yield each *page* as an async-generator step.
 
     Usage::
@@ -65,12 +66,18 @@ def _make_pr_info(**overrides):
 
 
 def _make_manager(**overrides):
-    """Build an AsyncMergeManager with a mocked GitHub client."""
-    defaults = {"token": "test-token", "preview_mode": False}
+    """Build an AsyncMergeManager with a mocked GitHub client.
+
+    Returns ``(manager, client)`` — see ``tests/conftest.py`` for the
+    typed-mock-client pattern and rationale.  Use ``client`` (not
+    ``mgr._github_client``) for all mock setup and assertions.
+    """
+    # Typed mock client pattern — see tests/conftest.py
+    from tests.conftest import make_merge_manager
+
+    defaults: dict[str, Any] = {"preview_mode": False}
     defaults.update(overrides)
-    mgr = AsyncMergeManager(**defaults)
-    mgr._github_client = AsyncMock()
-    return mgr
+    return make_merge_manager(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -293,51 +300,49 @@ class TestTriggerDependabotRecreateConditions:
 
     @pytest.mark.asyncio
     async def test_non_dependabot_author_returns_none(self):
-        mgr = _make_manager()
+        mgr, _client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info(author="some-human")
         result = await mgr._trigger_dependabot_recreate(pr)
         assert result is None
 
     @pytest.mark.asyncio
     async def test_no_github_client_returns_none(self):
-        mgr = _make_manager()
-        mgr._github_client = None
+        mgr, _client = _make_manager()  # typed mock client pattern (see conftest.py)
+        mgr._github_client = None  # intentionally set to None for this test
         pr = _make_pr_info()
         result = await mgr._trigger_dependabot_recreate(pr)
         assert result is None
 
     @pytest.mark.asyncio
     async def test_no_signature_requirement_returns_none(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
-        mgr._github_client.requires_commit_signatures = AsyncMock(return_value=False)
+        client.requires_commit_signatures = AsyncMock(return_value=False)
         result = await mgr._trigger_dependabot_recreate(pr)
         assert result is None
-        mgr._github_client.requires_commit_signatures.assert_called_once_with(
+        client.requires_commit_signatures.assert_called_once_with(
             "lfreleng-actions", "gerrit-clone-action", "main"
         )
 
     @pytest.mark.asyncio
     async def test_all_commits_verified_returns_none(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
-        mgr._github_client.requires_commit_signatures = AsyncMock(return_value=True)
-        mgr._github_client.check_pr_commit_signatures = AsyncMock(
-            return_value=(True, [])
-        )
+        client.requires_commit_signatures = AsyncMock(return_value=True)
+        client.check_pr_commit_signatures = AsyncMock(return_value=(True, []))
         result = await mgr._trigger_dependabot_recreate(pr)
         assert result is None
 
     @pytest.mark.asyncio
     async def test_duplicate_recreate_comment_returns_none(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
-        mgr._github_client.requires_commit_signatures = AsyncMock(return_value=True)
-        mgr._github_client.check_pr_commit_signatures = AsyncMock(
+        client.requires_commit_signatures = AsyncMock(return_value=True)
+        client.check_pr_commit_signatures = AsyncMock(
             return_value=(False, ["a4355a87"])
         )
         # Existing comments include a recreate comment
-        mgr._github_client.get = AsyncMock(
+        client.get = AsyncMock(
             return_value=[
                 {"body": "@dependabot recreate", "user": {"login": "someuser"}},
             ]
@@ -347,9 +352,9 @@ class TestTriggerDependabotRecreateConditions:
 
     @pytest.mark.asyncio
     async def test_signature_check_error_returns_none(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
-        mgr._github_client.requires_commit_signatures = AsyncMock(
+        client.requires_commit_signatures = AsyncMock(
             side_effect=Exception("API error")
         )
         result = await mgr._trigger_dependabot_recreate(pr)
@@ -364,14 +369,14 @@ class TestTriggerDependabotRecreateHappyPath:
 
     @pytest.mark.asyncio
     async def test_posts_recreate_and_finds_new_pr(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.requires_commit_signatures = AsyncMock(return_value=True)
-        mgr._github_client.check_pr_commit_signatures = AsyncMock(
+        client.requires_commit_signatures = AsyncMock(return_value=True)
+        client.check_pr_commit_signatures = AsyncMock(
             return_value=(False, ["a4355a87"])
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         # Sequence of get calls:
         # 1. Check for duplicate comments (issue comments)
@@ -418,9 +423,9 @@ class TestTriggerDependabotRecreateHappyPath:
             # 5. poll new PR checks (wait_for_recreated_pr_checks)
             new_pr_ready,
         ]
-        mgr._github_client.get = AsyncMock(side_effect=call_sequence)
+        client.get = AsyncMock(side_effect=call_sequence)
         # Files are now fetched via get_paginated
-        mgr._github_client.get_paginated = lambda *a, **kw: _async_gen([])
+        client.get_paginated = lambda *a, **kw: _async_gen([])
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await mgr._trigger_dependabot_recreate(pr)
@@ -429,7 +434,7 @@ class TestTriggerDependabotRecreateHappyPath:
         assert result.number == 107
         assert result.mergeable is True
         assert result.mergeable_state == "clean"
-        mgr._github_client.post_issue_comment.assert_called_once_with(
+        client.post_issue_comment.assert_called_once_with(
             "lfreleng-actions",
             "gerrit-clone-action",
             106,
@@ -438,17 +443,15 @@ class TestTriggerDependabotRecreateHappyPath:
 
     @pytest.mark.asyncio
     async def test_post_comment_failure_returns_none(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.requires_commit_signatures = AsyncMock(return_value=True)
-        mgr._github_client.check_pr_commit_signatures = AsyncMock(
+        client.requires_commit_signatures = AsyncMock(return_value=True)
+        client.check_pr_commit_signatures = AsyncMock(
             return_value=(False, ["a4355a87"])
         )
-        mgr._github_client.get = AsyncMock(return_value=[])  # no duplicate comments
-        mgr._github_client.post_issue_comment = AsyncMock(
-            side_effect=Exception("403 Forbidden")
-        )
+        client.get = AsyncMock(return_value=[])  # no duplicate comments
+        client.post_issue_comment = AsyncMock(side_effect=Exception("403 Forbidden"))
 
         result = await mgr._trigger_dependabot_recreate(pr)
         assert result is None
@@ -462,17 +465,17 @@ class TestTriggerDependabotRecreateTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_waiting_for_old_pr_to_close(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.requires_commit_signatures = AsyncMock(return_value=True)
-        mgr._github_client.check_pr_commit_signatures = AsyncMock(
+        client.requires_commit_signatures = AsyncMock(return_value=True)
+        client.check_pr_commit_signatures = AsyncMock(
             return_value=(False, ["a4355a87"])
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         # Always return the old PR as open
-        mgr._github_client.get = AsyncMock(
+        client.get = AsyncMock(
             side_effect=[
                 [],  # no duplicate comments
             ]
@@ -486,14 +489,14 @@ class TestTriggerDependabotRecreateTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_waiting_for_new_pr_checks(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.requires_commit_signatures = AsyncMock(return_value=True)
-        mgr._github_client.check_pr_commit_signatures = AsyncMock(
+        client.requires_commit_signatures = AsyncMock(return_value=True)
+        client.check_pr_commit_signatures = AsyncMock(
             return_value=(False, ["a4355a87"])
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         old_pr_closed = {"state": "closed", "number": 106}
         new_pr_list = [
@@ -524,7 +527,7 @@ class TestTriggerDependabotRecreateTimeout:
             new_pr_list,  # search for new PR
         ] + [new_pr_blocked] * 36  # all check polls: still blocked
 
-        mgr._github_client.get = AsyncMock(side_effect=call_sequence)
+        client.get = AsyncMock(side_effect=call_sequence)
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await mgr._trigger_dependabot_recreate(pr)
@@ -540,7 +543,7 @@ class TestWaitForRecreatedPrChecks:
 
     @pytest.mark.asyncio
     async def test_returns_pr_info_when_clean(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr_data = {
             "number": 107,
             "html_url": "https://github.com/owner/repo/pull/107",
@@ -560,9 +563,9 @@ class TestWaitForRecreatedPrChecks:
             "mergeable_state": "clean",
             "html_url": "https://github.com/owner/repo/pull/107",
         }
-        mgr._github_client.get = AsyncMock(return_value=refreshed)
+        client.get = AsyncMock(return_value=refreshed)
         # Files are now fetched via get_paginated
-        mgr._github_client.get_paginated = lambda *a, **kw: _async_gen([])
+        client.get_paginated = lambda *a, **kw: _async_gen([])
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await mgr._wait_for_recreated_pr_checks(
@@ -575,7 +578,7 @@ class TestWaitForRecreatedPrChecks:
 
     @pytest.mark.asyncio
     async def test_returns_none_on_dirty(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr_data = {
             "number": 107,
             "html_url": "https://github.com/owner/repo/pull/107",
@@ -585,7 +588,7 @@ class TestWaitForRecreatedPrChecks:
             "mergeable": False,
             "mergeable_state": "dirty",
         }
-        mgr._github_client.get = AsyncMock(return_value=dirty_pr)
+        client.get = AsyncMock(return_value=dirty_pr)
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await mgr._wait_for_recreated_pr_checks(
@@ -596,15 +599,15 @@ class TestWaitForRecreatedPrChecks:
 
     @pytest.mark.asyncio
     async def test_returns_none_without_client(self):
-        mgr = _make_manager()
-        mgr._github_client = None
+        mgr, _client = _make_manager()  # typed mock client pattern (see conftest.py)
+        mgr._github_client = None  # intentionally set to None for this test
         result = await mgr._wait_for_recreated_pr_checks("owner", "repo", 107, {})
         assert result is None
 
     @pytest.mark.asyncio
     async def test_returns_pr_info_on_unstable_with_mergeable_true(self):
         """unstable + mergeable=True should still be accepted."""
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr_data = {
             "number": 107,
             "html_url": "https://github.com/owner/repo/pull/107",
@@ -621,9 +624,9 @@ class TestWaitForRecreatedPrChecks:
             "mergeable_state": "unstable",
             "html_url": "https://github.com/owner/repo/pull/107",
         }
-        mgr._github_client.get = AsyncMock(return_value=unstable_pr)
+        client.get = AsyncMock(return_value=unstable_pr)
         # Files are now fetched via get_paginated
-        mgr._github_client.get_paginated = lambda *a, **kw: _async_gen([])
+        client.get_paginated = lambda *a, **kw: _async_gen([])
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await mgr._wait_for_recreated_pr_checks(
@@ -644,16 +647,16 @@ class TestMergeSinglePrRecreateIntegration:
     async def test_recreate_triggered_on_branch_protection_failure(self):
         """When a dependabot merge fails due to branch protection and
         the commit is unsigned, the recreate path should be triggered."""
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info(mergeable=True, mergeable_state="blocked")
 
         # Make the PR pass initial checks but fail the merge
-        mgr._github_client.get_branch_protection = AsyncMock(return_value={})
-        mgr._github_client.analyze_block_reason = AsyncMock(
+        client.get_branch_protection = AsyncMock(return_value={})
+        client.analyze_block_reason = AsyncMock(
             return_value="Blocked by branch protection (requires approval)"
         )
         # get() calls during _test_merge_capability etc.
-        mgr._github_client.get = AsyncMock(
+        client.get = AsyncMock(
             return_value={
                 "mergeable": True,
                 "mergeable_state": "blocked",
@@ -661,9 +664,9 @@ class TestMergeSinglePrRecreateIntegration:
                 "state": "open",
             }
         )
-        mgr._github_client.approve_pull_request = AsyncMock()
-        mgr._github_client.merge_pull_request = AsyncMock(return_value=False)
-        mgr._github_client.check_user_can_bypass_protection = AsyncMock(
+        client.approve_pull_request = AsyncMock()
+        client.merge_pull_request = AsyncMock(return_value=False)
+        client.check_user_can_bypass_protection = AsyncMock(
             return_value=(False, "no bypass")
         )
 
@@ -696,7 +699,7 @@ class TestMergeSinglePrRecreateIntegration:
             ),
         ):
             # Make the new PR merge succeed
-            mgr._github_client.merge_pull_request = AsyncMock(side_effect=[False, True])
+            client.merge_pull_request = AsyncMock(side_effect=[False, True])
 
             result = await mgr._merge_single_pr(pr)
 
@@ -708,16 +711,16 @@ class TestMergeSinglePrRecreateIntegration:
     @pytest.mark.asyncio
     async def test_no_recreate_for_non_dependabot(self):
         """Non-dependabot PRs should not trigger the recreate path."""
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info(
             author="some-human", mergeable=True, mergeable_state="blocked"
         )
 
-        mgr._github_client.get_branch_protection = AsyncMock(return_value={})
-        mgr._github_client.analyze_block_reason = AsyncMock(
+        client.get_branch_protection = AsyncMock(return_value={})
+        client.analyze_block_reason = AsyncMock(
             return_value="Blocked by branch protection (requires approval)"
         )
-        mgr._github_client.get = AsyncMock(
+        client.get = AsyncMock(
             return_value={
                 "mergeable": True,
                 "mergeable_state": "blocked",
@@ -725,9 +728,9 @@ class TestMergeSinglePrRecreateIntegration:
                 "state": "open",
             }
         )
-        mgr._github_client.approve_pull_request = AsyncMock()
-        mgr._github_client.merge_pull_request = AsyncMock(return_value=False)
-        mgr._github_client.check_user_can_bypass_protection = AsyncMock(
+        client.approve_pull_request = AsyncMock()
+        client.merge_pull_request = AsyncMock(return_value=False)
+        client.check_user_can_bypass_protection = AsyncMock(
             return_value=(False, "no bypass")
         )
 
@@ -750,14 +753,16 @@ class TestMergeSinglePrRecreateIntegration:
     @pytest.mark.asyncio
     async def test_no_recreate_in_preview_mode(self):
         """Preview mode should not trigger the recreate path."""
-        mgr = _make_manager(preview_mode=True)
+        mgr, client = _make_manager(
+            preview_mode=True
+        )  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info(mergeable=True, mergeable_state="blocked")
 
-        mgr._github_client.get_branch_protection = AsyncMock(return_value={})
-        mgr._github_client.analyze_block_reason = AsyncMock(
+        client.get_branch_protection = AsyncMock(return_value={})
+        client.analyze_block_reason = AsyncMock(
             return_value="Blocked by branch protection (requires approval)"
         )
-        mgr._github_client.get = AsyncMock(
+        client.get = AsyncMock(
             return_value={
                 "mergeable": True,
                 "mergeable_state": "blocked",
@@ -765,7 +770,7 @@ class TestMergeSinglePrRecreateIntegration:
                 "state": "open",
             }
         )
-        mgr._github_client.check_user_can_bypass_protection = AsyncMock(
+        client.check_user_can_bypass_protection = AsyncMock(
             return_value=(False, "no bypass")
         )
 
@@ -787,14 +792,14 @@ class TestMergeSinglePrRecreateIntegration:
     @pytest.mark.asyncio
     async def test_recreate_returns_none_falls_through_to_failure(self):
         """When recreate returns None, the original failure path is followed."""
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info(mergeable=True, mergeable_state="blocked")
 
-        mgr._github_client.get_branch_protection = AsyncMock(return_value={})
-        mgr._github_client.analyze_block_reason = AsyncMock(
+        client.get_branch_protection = AsyncMock(return_value={})
+        client.analyze_block_reason = AsyncMock(
             return_value="Blocked by branch protection (requires approval)"
         )
-        mgr._github_client.get = AsyncMock(
+        client.get = AsyncMock(
             return_value={
                 "mergeable": True,
                 "mergeable_state": "blocked",
@@ -802,9 +807,9 @@ class TestMergeSinglePrRecreateIntegration:
                 "state": "open",
             }
         )
-        mgr._github_client.approve_pull_request = AsyncMock()
-        mgr._github_client.merge_pull_request = AsyncMock(return_value=False)
-        mgr._github_client.check_user_can_bypass_protection = AsyncMock(
+        client.approve_pull_request = AsyncMock()
+        client.merge_pull_request = AsyncMock(return_value=False)
+        client.check_user_can_bypass_protection = AsyncMock(
             return_value=(False, "no bypass")
         )
 
@@ -834,14 +839,14 @@ class TestMergeSinglePrRecreateIntegration:
     @pytest.mark.asyncio
     async def test_recreate_new_pr_merge_fails(self):
         """When the recreated PR also fails to merge, report failure."""
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info(mergeable=True, mergeable_state="blocked")
 
-        mgr._github_client.get_branch_protection = AsyncMock(return_value={})
-        mgr._github_client.analyze_block_reason = AsyncMock(
+        client.get_branch_protection = AsyncMock(return_value={})
+        client.analyze_block_reason = AsyncMock(
             return_value="Blocked by branch protection (requires approval)"
         )
-        mgr._github_client.get = AsyncMock(
+        client.get = AsyncMock(
             return_value={
                 "mergeable": True,
                 "mergeable_state": "blocked",
@@ -849,10 +854,10 @@ class TestMergeSinglePrRecreateIntegration:
                 "state": "open",
             }
         )
-        mgr._github_client.approve_pull_request = AsyncMock()
+        client.approve_pull_request = AsyncMock()
         # All merge attempts fail
-        mgr._github_client.merge_pull_request = AsyncMock(return_value=False)
-        mgr._github_client.check_user_can_bypass_protection = AsyncMock(
+        client.merge_pull_request = AsyncMock(return_value=False)
+        client.check_user_can_bypass_protection = AsyncMock(
             return_value=(False, "no bypass")
         )
 
@@ -897,14 +902,14 @@ class TestNewPrDiscoveryEdgeCases:
     @pytest.mark.asyncio
     async def test_ignores_prs_from_other_authors(self):
         """Only dependabot PRs should be considered as replacements."""
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.requires_commit_signatures = AsyncMock(return_value=True)
-        mgr._github_client.check_pr_commit_signatures = AsyncMock(
+        client.requires_commit_signatures = AsyncMock(return_value=True)
+        client.check_pr_commit_signatures = AsyncMock(
             return_value=(False, ["a4355a87"])
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         old_pr_closed = {"state": "closed", "number": 106}
         # New PR from a different author
@@ -927,7 +932,7 @@ class TestNewPrDiscoveryEdgeCases:
             old_pr_closed,  # poll 1: old PR closed
         ] + [new_pr_list] * 35  # keep finding wrong-author PRs
 
-        mgr._github_client.get = AsyncMock(side_effect=call_sequence)
+        client.get = AsyncMock(side_effect=call_sequence)
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await mgr._trigger_dependabot_recreate(pr)
@@ -937,14 +942,14 @@ class TestNewPrDiscoveryEdgeCases:
     @pytest.mark.asyncio
     async def test_ignores_same_pr_number(self):
         """The old PR number should not be considered as a replacement."""
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.requires_commit_signatures = AsyncMock(return_value=True)
-        mgr._github_client.check_pr_commit_signatures = AsyncMock(
+        client.requires_commit_signatures = AsyncMock(return_value=True)
+        client.check_pr_commit_signatures = AsyncMock(
             return_value=(False, ["a4355a87"])
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         old_pr_closed = {"state": "closed", "number": 106}
         # Same PR number appearing in the open PR list (shouldn't happen but edge case)
@@ -966,7 +971,7 @@ class TestNewPrDiscoveryEdgeCases:
             old_pr_closed,  # poll 1: old PR closed
         ] + [new_pr_list] * 35
 
-        mgr._github_client.get = AsyncMock(side_effect=call_sequence)
+        client.get = AsyncMock(side_effect=call_sequence)
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await mgr._trigger_dependabot_recreate(pr)

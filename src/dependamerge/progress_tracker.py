@@ -1,41 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
+from __future__ import annotations
+
 from datetime import datetime, timedelta
 from typing import Any
 
 try:
-    from rich.console import Console
-    from rich.live import Live
-    from rich.text import Text
+    from rich.console import Console  # pyright: ignore[reportAssignmentType]
+    from rich.live import Live  # pyright: ignore[reportAssignmentType]
+    from rich.text import Text  # pyright: ignore[reportAssignmentType]
 
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
 
-    # Fallback classes for when Rich is not available
-    class Live:  # type: ignore
-        def __init__(self, *args, **kwargs):
+    class Live:  # type: ignore[no-redef]  # pyright: ignore[reportRedefinition]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def start(self):
+        def start(self) -> None:
             pass
 
-        def stop(self):
+        def stop(self) -> None:
             pass
 
-        def update(self, *args):
+        def update(self, *args: Any) -> None:
             pass
 
-    class Text:  # type: ignore
-        def __init__(self, *args, **kwargs):
+    class Text:  # type: ignore[no-redef]  # pyright: ignore[reportRedefinition]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def append(self, *args, **kwargs):
+        def append(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-    class Console:  # type: ignore
-        def __init__(self, *args, **kwargs):
+    class Console:  # type: ignore[no-redef]  # pyright: ignore[reportRedefinition]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
 
@@ -51,7 +52,7 @@ class ProgressTracker:
         """
         self.organization = organization
         self.start_time = datetime.now()
-        self.console = Console() if RICH_AVAILABLE else None
+        self.console: Any = Console() if RICH_AVAILABLE else None
 
         # Progress counters
         self.total_repositories = 0
@@ -70,7 +71,7 @@ class ProgressTracker:
         self.rate_limit_reset_time: datetime | None = None
 
         # Rich Live display
-        self.live: Live | None = None
+        self.live: Any = None
         self.rich_available = RICH_AVAILABLE
         self.paused = False
         # Metrics (optional; displayed when provided)
@@ -80,7 +81,7 @@ class ProgressTracker:
         # Fallback for when Rich is not available
         self._last_display = ""
 
-    def start(self):
+    def start(self) -> None:
         """Start the live progress display."""
         if not self.rich_available:
             return
@@ -97,29 +98,27 @@ class ProgressTracker:
         except Exception:
             # Fallback if Rich display fails (e.g., unsupported terminal)
             self.rich_available = False
-            self.live = None
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the live progress display."""
         if self.live:
             try:
                 self.live.stop()
             except Exception:
-                # Ignore errors when stopping display
                 pass
-        # Ensure paused state is cleared when fully stopped
+        self.live = None
         self.paused = False
 
-    def suspend(self):
-        """Temporarily pause the live display to allow clean printing elsewhere."""
-        if self.live and self.rich_available and not self.paused:
+    def suspend(self) -> None:
+        """Temporarily suspend the live display (e.g. for interactive prompts)."""
+        if self.live:
             try:
                 self.live.stop()
             except Exception:
                 pass
             self.paused = True
 
-    def resume(self):
+    def resume(self) -> None:
         """Resume the live display after it was suspended."""
         if self.rich_available and self.paused:
             try:
@@ -132,68 +131,69 @@ class ProgressTracker:
                 if self.live:
                     self.live.start()
             except Exception:
-                # Fall back if restarting live display fails
                 self.rich_available = False
-                self.live = None
-            finally:
-                self.paused = False
+            self.paused = False
 
-    def update_metrics(self, concurrency: int, rps: float):
-        """Update concurrency and RPS metrics (no-op since metrics are not displayed)."""
-        pass
+    def update_metrics(self, concurrency: int, rps: float) -> None:
+        self.metrics_concurrency = concurrency
+        self.metrics_rps = rps
+        self._refresh_display()
 
-    def clear_metrics(self):
-        """Clear the concurrency and RPS metrics (no-op since metrics are not displayed)."""
-        pass
+    def clear_metrics(self) -> None:
+        self.metrics_concurrency = None
+        self.metrics_rps = None
+        self._refresh_display()
 
-    def update_total_repositories(self, total: int):
-        """Update the total number of repositories to check."""
+    def update_total_repositories(self, total: int) -> None:
+        """Update the total number of repositories to scan."""
         self.total_repositories = total
         self._refresh_display()
 
-    def start_repository(self, repo_name: str):
-        """Mark the start of checking a new repository."""
+    def start_repository(self, repo_name: str) -> None:
+        """Mark the start of scanning a repository."""
         self.current_repository = repo_name
-        self.current_operation = f"Getting PRs from {repo_name}"
+        self.current_operation = f"Scanning {repo_name}..."
         self._refresh_display()
 
-    def complete_repository(self, unmergeable_count: int = 0):
+    def complete_repository(self, unmergeable_count: int = 0) -> None:
         """Mark completion of a repository check."""
         self.completed_repositories += 1
         self.unmergeable_prs_found += unmergeable_count
-        self.current_operation = "Moving to next repository..."
         self._refresh_display()
 
-    def update_operation(self, operation: str):
+    def update_operation(self, operation: str) -> None:
         """Update the current operation description."""
         self.current_operation = operation
         self._refresh_display()
 
-    def analyze_pr(self, pr_number: int, repo_name: str):
+    def analyze_pr(self, pr_number: int, repo_name: str = "") -> None:
         """Mark the start of analyzing a specific PR."""
         self.total_prs_analyzed += 1
-        self.current_operation = f"Analyzing PR #{pr_number} in {repo_name}"
+        if repo_name:
+            self.current_operation = f"Analyzing PR #{pr_number} in {repo_name}"
+        else:
+            self.current_operation = f"Analyzing PR #{pr_number}..."
         self._refresh_display()
 
-    def add_error(self):
+    def add_error(self) -> None:
         """Increment the error counter."""
         self.errors_count += 1
         self._refresh_display()
 
-    def set_rate_limited(self, reset_time: datetime):
-        """Mark that we're rate limited and show countdown."""
+    def set_rate_limited(self, reset_time: datetime | None = None) -> None:
+        """Mark that we're rate limited."""
         self.rate_limited = True
         self.rate_limit_reset_time = reset_time
         self._refresh_display()
 
-    def clear_rate_limited(self):
-        """Clear the rate limited status."""
+    def clear_rate_limited(self) -> None:
+        """Clear rate limit state."""
         self.rate_limited = False
         self.rate_limit_reset_time = None
         self._refresh_display()
 
-    def _refresh_display(self):
-        """Refresh the live display if it's active."""
+    def _refresh_display(self) -> None:
+        """Refresh the live display with current progress."""
         if self.live and self.rich_available and not self.paused:
             try:
                 self.live.update(self._generate_display_text())
@@ -203,7 +203,7 @@ class ProgressTracker:
         elif not self.rich_available:
             self._fallback_display()
 
-    def _generate_display_text(self) -> Text:
+    def _generate_display_text(self) -> Any:
         """Generate the current progress display text."""
         if not self.rich_available:
             return Text()
@@ -217,91 +217,101 @@ class ProgressTracker:
             text.append(f"{self.organization} ", style="bold cyan")
             text.append(
                 f"({self.completed_repositories}/{self.total_repositories} repos, ",
-                style="white",
+                style="dim",
             )
-            text.append(f"{progress_pct:.0f}%", style="green")
-            text.append(") | ", style="white")
+            text.append(f"{progress_pct:.0f}%", style="bold green")
+            text.append(")", style="dim")
         else:
-            text.append("🔍 Checking organization ", style="bold blue")
-            text.append(f"{self.organization}", style="bold cyan")
-            text.append(" (counting repositories...)", style="white")
+            text.append("🔍 Checking ", style="bold blue")
+            text.append(f"{self.organization} ", style="bold cyan")
+            text.append("(initializing...)", style="dim")
 
-        # Stats (only when repo count is known and PR stats are enabled)
-        if self.total_repositories > 0 and self.show_pr_stats:
-            text.append(f"{self.total_prs_analyzed} PRs analyzed | ", style="white")
+        # Current operation
+        if self.current_operation:
+            text.append(f"\n   {self.current_operation}", style="dim")
 
+        # Stats line (optional)
+        if self.show_pr_stats and self.total_prs_analyzed > 0:
+            text.append("\n   📊 PRs analyzed: ", style="dim")
+            text.append(str(self.total_prs_analyzed), style="bold")
             if self.unmergeable_prs_found > 0:
-                text.append(f"{self.unmergeable_prs_found} unmergeable", style="red")
-            else:
-                text.append(f"{self.unmergeable_prs_found} unmergeable", style="green")
+                text.append(" | ⚠️  Unmergeable: ", style="dim")
+                text.append(str(self.unmergeable_prs_found), style="bold yellow")
 
-            if self.errors_count > 0:
-                text.append(f" | {self.errors_count} errors", style="yellow")
-        elif self.total_repositories > 0 and not self.show_pr_stats:
-            # Show errors even when PR stats are disabled
-            if self.errors_count > 0:
-                text.append(f"{self.errors_count} errors", style="yellow")
+        # Metrics line (concurrency / requests-per-second)
+        if self.metrics_concurrency is not None or self.metrics_rps is not None:
+            parts: list[str] = []
+            if self.metrics_concurrency is not None:
+                parts.append(f"concurrency={self.metrics_concurrency}")
+            if self.metrics_rps is not None:
+                parts.append(f"rps={self.metrics_rps:.1f}")
+            text.append(f"\n   ⚡ {', '.join(parts)}", style="dim")
 
-        text.append("\n")
+        # Error count
+        if self.errors_count > 0:
+            text.append(f"\n   ❌ Errors: {self.errors_count}", style="bold red")
 
-        # Current operation line
-        if self.rate_limited and self.rate_limit_reset_time:
-            remaining = self.rate_limit_reset_time - datetime.now()
-            if remaining.total_seconds() > 0:
-                text.append(
-                    f"⏳ Rate limited - waiting {remaining.seconds}s", style="yellow"
-                )
-            else:
-                text.append("⚡ Rate limit reset - resuming...", style="green")
-        else:
-            text.append(f"📋 {self.current_operation}", style="dim white")
+        # Rate limit indicator
+        if self.rate_limited:
+            text.append("\n   ⏳ Rate limited", style="bold yellow")
+            if self.rate_limit_reset_time:
+                remaining = self.rate_limit_reset_time - datetime.now()
+                if remaining.total_seconds() > 0:
+                    text.append(
+                        f" (resets in {self._format_duration(remaining)})",
+                        style="yellow",
+                    )
 
         # Elapsed time
         elapsed = datetime.now() - self.start_time
-        text.append(f"\n⏱️  Elapsed: {self._format_duration(elapsed)}", style="dim blue")
+        text.append(
+            f"\n   ⏱️  Elapsed: {self._format_duration(elapsed)}", style="dim"
+        )
 
         return text
 
-    def _fallback_display(self):
-        """Fallback display method for when Rich is not available."""
-        # Generate simple text display
+    def _fallback_display(self) -> None:
+        """Simple text fallback when Rich is not available."""
         if self.total_repositories > 0:
             progress_pct = (self.completed_repositories / self.total_repositories) * 100
-            if self.show_pr_stats:
-                progress_line = f"🔍 Checking {self.organization} ({self.completed_repositories}/{self.total_repositories} repos, {progress_pct:.0f}%) | {self.total_prs_analyzed} PRs analyzed | {self.unmergeable_prs_found} unmergeable"
-            else:
-                progress_line = f"🔍 Checking {self.organization} ({self.completed_repositories}/{self.total_repositories} repos, {progress_pct:.0f}%)"
-            if self.errors_count > 0:
-                progress_line += f" | {self.errors_count} errors"
+            display = (
+                f"Progress: {self.completed_repositories}/{self.total_repositories} "
+                f"repos ({progress_pct:.0f}%)"
+            )
         else:
-            progress_line = f"🔍 Checking organization {self.organization} (counting repositories...)"
+            display = "Initializing..."
 
-        operation_line = f"📋 {self.current_operation}"
-        elapsed = datetime.now() - self.start_time
-        time_line = f"⏱️  Elapsed: {self._format_duration(elapsed)}"
+        if self.current_operation:
+            display += f" | {self.current_operation}"
 
-        current_display = f"{progress_line}\n{operation_line}\n{time_line}"
+        if self.total_prs_analyzed > 0:
+            display += f" | PRs: {self.total_prs_analyzed}"
 
-        # Only print if display has changed to avoid spam
-        if current_display != self._last_display:
-            print(f"\r{current_display}\n", end="", flush=True)
-            self._last_display = current_display
+        if self.errors_count > 0:
+            display += f" | Errors: {self.errors_count}"
 
-    def _format_duration(self, duration: timedelta) -> str:
-        """Format a duration for display."""
-        total_seconds = int(duration.total_seconds())
+        # Only print if display has changed
+        if display != self._last_display:
+            print(display)
+            self._last_display = display
+
+    def _format_duration(self, td: timedelta) -> str:
+        """Format a timedelta as a human-readable duration string."""
+        total_seconds = int(td.total_seconds())
+        if total_seconds < 60:
+            return f"{total_seconds}s"
         minutes = total_seconds // 60
         seconds = total_seconds % 60
-
-        if minutes > 0:
+        if minutes < 60:
             return f"{minutes}m {seconds}s"
-        else:
-            return f"{seconds}s"
+        hours = minutes // 60
+        minutes = minutes % 60
+        return f"{hours}h {minutes}m {seconds}s"
 
     def get_summary(self) -> dict[str, Any]:
-        """Get a summary of the checking progress."""
+        """Get a summary of the progress tracking."""
         elapsed = datetime.now() - self.start_time
-
+        formatted = self._format_duration(elapsed)
         return {
             "organization": self.organization,
             "total_repositories": self.total_repositories,
@@ -309,43 +319,45 @@ class ProgressTracker:
             "total_prs_analyzed": self.total_prs_analyzed,
             "unmergeable_prs_found": self.unmergeable_prs_found,
             "errors_count": self.errors_count,
-            "elapsed_time": self._format_duration(elapsed),
-            "rate_limited": self.rate_limited,
+            "elapsed_seconds": elapsed.total_seconds(),
+            "elapsed_formatted": formatted,
+            # Backward-compatible alias used by cli.py
+            "elapsed_time": formatted,
         }
 
 
 class MergeProgressTracker(ProgressTracker):
-    """Specialized progress tracker for merge operations."""
+    """Extended progress tracker with merge-specific metrics."""
 
     def __init__(self, organization: str, is_close_operation: bool = False):
-        super().__init__(organization)
+        super().__init__(organization, show_pr_stats=True)
         self.similar_prs_found = 0
         self.prs_merged = 0
-        self.merge_failures = 0
+        self.prs_failed = 0
         self.prs_closed = 0
         self.is_close_operation = is_close_operation
 
-    def found_similar_pr(self):
-        """Mark that a similar PR was found."""
-        self.similar_prs_found += 1
+    def found_similar_pr(self, count: int = 1) -> None:
+        """Update count of similar PRs found."""
+        self.similar_prs_found += count
         self._refresh_display()
 
-    def merge_success(self):
-        """Mark a successful merge."""
+    def merge_success(self) -> None:
+        """Record a successful merge."""
         self.prs_merged += 1
         self._refresh_display()
 
-    def merge_failure(self):
-        """Mark a failed merge."""
-        self.merge_failures += 1
+    def merge_failure(self) -> None:
+        """Record a failed merge."""
+        self.prs_failed += 1
         self._refresh_display()
 
-    def increment_closed(self):
-        """Mark a successful close."""
+    def increment_closed(self) -> None:
+        """Record a successful close."""
         self.prs_closed += 1
         self._refresh_display()
 
-    def _generate_display_text(self) -> Text:
+    def _generate_display_text(self) -> Any:
         """Generate merge-specific display text."""
         if not self.rich_available:
             return Text()
@@ -359,109 +371,146 @@ class MergeProgressTracker(ProgressTracker):
             operation_text = (
                 "Searching for similar PRs"
                 if not self.is_close_operation
-                else "Searching for similar PRs"
+                else "Closing PRs"
             )
-            text.append(f"{operation_icon} {operation_text} ", style="bold blue")
+            text.append(f"{operation_icon} {operation_text} in ", style="bold blue")
+            text.append(f"{self.organization} ", style="bold cyan")
             text.append(
                 f"({self.completed_repositories}/{self.total_repositories} repos, ",
-                style="white",
+                style="dim",
             )
-            text.append(f"{progress_pct:.0f}%", style="green")
-            text.append(") | ", style="white")
+            text.append(f"{progress_pct:.0f}%", style="bold green")
+            text.append(")", style="dim")
         else:
-            # Special heading when examining the source PR before repo enumeration
-            if "Getting source PR details" in (self.current_operation or ""):
-                text.append("🔍 Examining source pull request in ", style="bold blue")
-                text.append(f"{self.organization}", style="bold cyan")
-            else:
-                operation_icon = "🚪" if self.is_close_operation else "🔀"
-                text.append(f"{operation_icon} Analyzing PRs in ", style="bold blue")
-                text.append(f"{self.organization}", style="bold cyan")
+            text.append("🔀 Merging PRs in ", style="bold blue")
+            text.append(f"{self.organization} ", style="bold cyan")
 
-        # Stats for merge operations (only when repo count is known)
-        if self.total_repositories > 0:
-            text.append(f"{self.total_prs_analyzed} PRs analyzed", style="white")
-            if self.errors_count > 0:
-                text.append(f" | {self.errors_count} errors", style="yellow")
+        # Current operation
+        if self.current_operation:
+            text.append(f"\n   {self.current_operation}", style="dim")
 
-        text.append("\n")
+        # Merge stats
+        stats_parts: list[str] = []
+        if self.similar_prs_found > 0:
+            stats_parts.append(f"Similar: {self.similar_prs_found}")
+        if self.prs_merged > 0:
+            stats_parts.append(f"✅ Merged: {self.prs_merged}")
+        if self.prs_closed > 0:
+            stats_parts.append(f"🚪 Closed: {self.prs_closed}")
+        if self.prs_failed > 0:
+            stats_parts.append(f"❌ Failed: {self.prs_failed}")
 
-        # Current operation line
-        if self.rate_limited and self.rate_limit_reset_time:
-            remaining = self.rate_limit_reset_time - datetime.now()
-            if remaining.total_seconds() > 0:
-                text.append(
-                    f"⏳ Rate limited - waiting {remaining.seconds}s", style="yellow"
-                )
-            else:
-                text.append("⚡ Rate limit reset - resuming...", style="green")
-        else:
-            text.append(f"📋 {self.current_operation}", style="dim white")
+        if stats_parts:
+            text.append(f"\n   📊 {' | '.join(stats_parts)}", style="dim")
+
+        # Metrics line
+        if self.metrics_concurrency is not None or self.metrics_rps is not None:
+            parts: list[str] = []
+            if self.metrics_concurrency is not None:
+                parts.append(f"concurrency={self.metrics_concurrency}")
+            if self.metrics_rps is not None:
+                parts.append(f"rps={self.metrics_rps:.1f}")
+            text.append(f"\n   ⚡ {', '.join(parts)}", style="dim")
+
+        # Error count
+        if self.errors_count > 0:
+            text.append(f"\n   ❌ Errors: {self.errors_count}", style="bold red")
+
+        # Rate limit indicator
+        if self.rate_limited:
+            text.append("\n   ⏳ Rate limited", style="bold yellow")
 
         # Elapsed time
         elapsed = datetime.now() - self.start_time
-        text.append(f"\n⏱️  Elapsed: {self._format_duration(elapsed)}", style="dim blue")
+        text.append(
+            f"\n   ⏱️  Elapsed: {self._format_duration(elapsed)}", style="dim"
+        )
 
         return text
 
     def get_summary(self) -> dict[str, Any]:
         """Get merge-specific summary."""
-        summary = super().get_summary()
-        summary.update(
+        base = super().get_summary()
+        base.update(
             {
                 "similar_prs_found": self.similar_prs_found,
                 "prs_merged": self.prs_merged,
-                "merge_failures": self.merge_failures,
+                "prs_failed": self.prs_failed,
                 "prs_closed": self.prs_closed,
             }
         )
-        return summary
+        return base
 
 
-class DummyProgressTracker:
+class DummyProgressTracker(ProgressTracker):
     """A no-op progress tracker for when progress display is disabled."""
 
-    def __init__(self, organization: str):
-        self.organization = organization
+    def __init__(self) -> None:
+        # Don't call super().__init__() to avoid Rich initialization
+        self.organization = ""
+        self.start_time = datetime.now()
+        self.console = None
+        self.total_repositories = 0
+        self.completed_repositories = 0
+        self.current_repository = ""
+        self.total_prs_analyzed = 0
+        self.unmergeable_prs_found = 0
+        self.current_operation = ""
+        self.errors_count = 0
+        self.show_pr_stats = False
+        self.rate_limited = False
+        self.rate_limit_reset_time = None
+        self.live = None
+        self.rich_available = False
+        self.paused = False
+        self.metrics_concurrency = None
+        self.metrics_rps = None
+        self._last_display = ""
+        # MergeProgressTracker fields
+        self.similar_prs_found = 0
+        self.prs_merged = 0
+        self.prs_failed = 0
+        self.prs_closed = 0
+        self.is_close_operation = False
 
-    def start(self):
+    def start(self) -> None:
         pass
 
-    def stop(self):
+    def stop(self) -> None:
         pass
 
-    def update_total_repositories(self, total: int):
+    def update_total_repositories(self, total: int) -> None:
         pass
 
-    def start_repository(self, repo_name: str):
+    def start_repository(self, repo_name: str) -> None:
         pass
 
-    def complete_repository(self, unmergeable_count: int = 0):
+    def complete_repository(self, unmergeable_count: int = 0) -> None:
         pass
 
-    def update_operation(self, operation: str):
+    def update_operation(self, operation: str) -> None:
         pass
 
-    def analyze_pr(self, pr_number: int, repo_name: str):
+    def analyze_pr(self, pr_number: int, repo_name: str = "") -> None:
         pass
 
-    def add_error(self):
+    def add_error(self) -> None:
         pass
 
-    def set_rate_limited(self, reset_time: datetime):
+    def set_rate_limited(self, reset_time: datetime | None = None) -> None:
         pass
 
-    def clear_rate_limited(self):
+    def clear_rate_limited(self) -> None:
         pass
 
-    def found_similar_pr(self):
+    def found_similar_pr(self, count: int = 1) -> None:
         pass
 
-    def merge_success(self):
+    def merge_success(self) -> None:
         pass
 
-    def merge_failure(self):
+    def merge_failure(self) -> None:
         pass
 
     def get_summary(self) -> dict[str, Any]:
-        return {"organization": self.organization}
+        return {}

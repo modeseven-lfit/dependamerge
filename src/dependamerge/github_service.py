@@ -224,7 +224,7 @@ class GitHubService:
                         [f"Error scanning repository {repo_full_name}: {e}"],
                     )
 
-        tasks: list[asyncio.Task] = []
+        tasks: list[asyncio.Task[Any]] = []
         async for repo in self._iter_org_repositories_with_open_prs(org):
             tasks.append(asyncio.create_task(process_repo(repo)))
 
@@ -1054,7 +1054,7 @@ class GitHubService:
                         self._progress.add_error()
                     return None, 0, [f"Error scanning repository {repo_full_name}: {e}"]
 
-        tasks: list[asyncio.Task] = []
+        tasks: list[asyncio.Task[Any]] = []
         async for repo in self._iter_org_repositories(org):
             tasks.append(asyncio.create_task(process_repo_status(repo)))
 

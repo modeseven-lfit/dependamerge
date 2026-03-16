@@ -37,7 +37,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-
 log = logging.getLogger("dependamerge.github2gerrit_detector")
 
 # HTML markers used by github2gerrit-action to delimit mapping blocks

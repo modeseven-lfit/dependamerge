@@ -298,19 +298,6 @@ mutation DismissPullRequestReview($reviewId: ID!, $message: String!) {
 }
 """
 
-RESOLVE_REVIEW_THREAD = """
-mutation ResolveReviewThread($threadId: ID!) {
-  resolveReviewThread(input: {
-    threadId: $threadId
-  }) {
-    thread {
-      id
-      isResolved
-    }
-  }
-}
-"""
-
 # GraphQL query to get branch protection settings for a repository
 GET_BRANCH_PROTECTION = """
 query GetBranchProtection($owner: String!, $name: String!, $branch: String!) {

@@ -14,6 +14,7 @@ import pytest
 
 from dependamerge.gerrit.models import (
     GerritChangeInfo,
+    GerritComparisonResult,
     GerritFileChange,
     GerritSubmitResult,
 )
@@ -327,7 +328,7 @@ class TestSubmitChanges:
             password="pass",
         )
 
-        changes = [
+        changes: list[tuple[GerritChangeInfo, GerritComparisonResult | None]] = [
             (
                 GerritChangeInfo(
                     number=i,
@@ -380,7 +381,7 @@ class TestSubmitChangesParallel:
             max_workers=3,
         )
 
-        changes = [
+        changes: list[tuple[GerritChangeInfo, GerritComparisonResult | None]] = [
             (
                 GerritChangeInfo(
                     number=i,

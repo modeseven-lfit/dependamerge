@@ -111,6 +111,7 @@ class TestForceLevelNone:
             result = await manager._merge_single_pr(pr_with_blocking_review)
 
             assert result.status == MergeStatus.SKIPPED
+            assert result.error is not None
             assert "reviews requesting changes" in result.error.lower()
 
     @pytest.mark.asyncio
@@ -172,6 +173,7 @@ class TestForceLevelCodeOwners:
             result = await manager._merge_single_pr(pr_with_blocking_review)
 
             assert result.status == MergeStatus.SKIPPED
+            assert result.error is not None
             assert "reviews requesting changes" in result.error.lower()
 
     @pytest.mark.asyncio
@@ -260,6 +262,7 @@ class TestForceLevelProtectionRules:
             result = await manager._merge_single_pr(pr_with_blocking_review)
 
             assert result.status == MergeStatus.SKIPPED
+            assert result.error is not None
             assert "reviews requesting changes" in result.error.lower()
 
     @pytest.mark.asyncio
@@ -321,9 +324,9 @@ class TestForceLevelAll:
             result = await manager._merge_single_pr(pr_with_blocking_review)
 
             # With force=all, should not skip on blocking reviews
-            assert (
-                result.status != MergeStatus.SKIPPED
-                or "reviews requesting changes" not in result.error.lower()
+            assert result.status != MergeStatus.SKIPPED or (
+                result.error is not None
+                and "reviews requesting changes" not in result.error.lower()
             )
 
     @pytest.mark.asyncio
