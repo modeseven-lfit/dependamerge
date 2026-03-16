@@ -118,7 +118,7 @@ addopts = [
 ]
 asyncio_mode = "auto"
 markers = [
-  "slow: marks tests as slow (deselected by pre-commit hooks)",
+  "slow: marks tests as slow (deselected by prek/pre-commit hooks)",
 ]
 
 [tool.coverage.run]

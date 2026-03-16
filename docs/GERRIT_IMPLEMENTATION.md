@@ -473,7 +473,7 @@ def gerrit_client(monkeypatch) -> GerritRestClient:
 1. **Run pre-commit hooks:**
 
    ```sh
-   pre-commit run -a
+   prek run -a
    ```
 
 2. **Check type hints:**
