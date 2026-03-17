@@ -17,6 +17,8 @@ from dependamerge.models import (
 class TestBlockedCommand:
     """Tests for the blocked command and include-drafts flag."""
 
+    runner: CliRunner = CliRunner()
+
     def setup_method(self):
         self.runner = CliRunner()
 

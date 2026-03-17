@@ -300,9 +300,10 @@ class GitHubAsync:
         if "403" in error_str or "Forbidden" in error_str:
             # Try to get more detailed error info from response
             response_text = ""
-            if hasattr(error, "response") and hasattr(error.response, "text"):
+            response = getattr(error, "response", None)
+            if response is not None:
                 try:
-                    response_text = error.response.text.lower()
+                    response_text = str(getattr(response, "text", "")).lower()
                 except AttributeError:
                     pass
 

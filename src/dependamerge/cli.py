@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ._version import __version__
-from .close_manager import AsyncCloseManager
+from .close_manager import AsyncCloseManager, CloseResult
 from .error_codes import (
     DependamergeError,
     ExitCode,
@@ -52,7 +52,7 @@ from .github_async import (
 from .github_client import GitHubClient
 from .github_service import AUTOMATION_TOOLS
 from .merge_manager import AsyncMergeManager
-from .models import PullRequestInfo
+from .models import ComparisonResult, PullRequestInfo
 from .pr_comparator import PRComparator
 from .progress_tracker import MergeProgressTracker, ProgressTracker
 from .netrc import (
@@ -423,9 +423,12 @@ def _handle_gerrit_merge(
                 console.print(f"    {_format_gerrit_similarity(comparison)}")
 
         # Prepare list of changes to submit (similar + source)
-        all_changes: list[tuple[GerritChangeInfo, GerritComparisonResult | None]] = (
-            similar_changes + [(source_change, None)]
+        source_entry: tuple[GerritChangeInfo, GerritComparisonResult | None] = (
+            source_change, None
         )
+        all_changes: list[tuple[GerritChangeInfo, GerritComparisonResult | None]] = [
+            *similar_changes, source_entry
+        ]
 
         # Check permissions on the source change before proceeding
         # Permissions are per-project in Gerrit, so we check the source change
@@ -712,6 +715,9 @@ def merge(
         # GitHub flow continues below
         # Parse PR URL to get organization info
         github_client = GitHubClient(token)
+        # GitHubClient resolves None -> GITHUB_TOKEN env var (raises if missing)
+        assert github_client.token is not None
+        token = github_client.token
         owner, repo_name, pr_number = github_client.parse_pr_url(pr_url)
 
         # Initialize progress tracker with organization name
@@ -999,7 +1005,7 @@ def merge(
         # Merge PRs in parallel using async merge manager
         async def _merge_parallel():
             async with AsyncMergeManager(
-                token=token,
+                token=token,  # pyright: ignore[reportArgumentType]
                 merge_method=merge_method,
                 max_retries=MAX_RETRIES,
                 concurrency=10,  # Process up to 10 PRs concurrently
@@ -1076,7 +1082,7 @@ def merge(
                             # Define async function for real merge
                             async def _real_merge():
                                 async with AsyncMergeManager(
-                                    token=token,
+                                    token=token,  # pyright: ignore[reportArgumentType]
                                     merge_method=merge_method,
                                     max_retries=MAX_RETRIES,
                                     concurrency=10,
@@ -1273,6 +1279,9 @@ def close(
     try:
         # Parse PR URL first to get organization info
         github_client = GitHubClient(token)
+        # GitHubClient resolves None -> GITHUB_TOKEN env var (raises if missing)
+        assert github_client.token is not None
+        token = github_client.token
         owner, repo_name, pr_number = github_client.parse_pr_url(pr_url)
 
         if show_progress:
@@ -1427,7 +1436,9 @@ def close(
         all_prs_to_close = [source_pr] + [pr for pr, _ in all_similar_prs]
 
         # Perform preview close operation
-        async def _close_parallel(prs, preview_mode):
+        async def _close_parallel(
+            prs: list[PullRequestInfo], preview_mode: bool
+        ) -> list[CloseResult]:
             close_manager = AsyncCloseManager(
                 token=token,
                 progress_tracker=progress_tracker,
@@ -1435,7 +1446,9 @@ def close(
             )
             async with close_manager:
                 # Convert to list of tuples (PR, None) for consistency
-                pr_tuples = [(pr, None) for pr in prs]
+                pr_tuples: list[tuple[PullRequestInfo, ComparisonResult | None]] = [
+                    (pr, None) for pr in prs
+                ]
                 return await close_manager.close_prs_parallel(pr_tuples)
 
         # Perform preview to check which PRs can be closed

@@ -963,17 +963,19 @@ uv run pytest -k "similarity and not slow" -vv
 
 #### Pre-commit Integration
 
-Tests are automatically integrated into pre-commit hooks and run on every commit:
+Tests are automatically integrated into pre-commit hooks and run on every commit.
+This project uses [prek](https://github.com/j178/prek) (a faster, Rust-based
+drop-in replacement for pre-commit) as the local hook runner:
 
 ```bash
-# Install pre-commit hooks (tests will run automatically on commits)
-uv run pre-commit install
+# Install prek git hooks (tests will run automatically on commits)
+prek install
 
 # Run all checks including tests manually
-uv run pre-commit run --all-files
+prek run --all-files
 
 # Run the pytest hook
-uv run pre-commit run pytest
+prek run pytest
 ```
 
 Note: The pytest hook runs automatically on every commit to ensure code quality.

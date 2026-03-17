@@ -15,12 +15,12 @@ Covers:
 - Ruleset branch filtering (_ruleset_applies_to_branch)
 """
 
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from dependamerge.github_async import GitHubAsync
-from dependamerge.merge_manager import AsyncMergeManager
 from dependamerge.models import PullRequestInfo
 
 
@@ -47,12 +47,18 @@ def _make_pr_info(**overrides):
 
 
 def _make_manager(**overrides):
-    """Build an AsyncMergeManager with a mocked GitHub client."""
-    defaults = {"token": "test-token", "preview_mode": False}
+    """Build an AsyncMergeManager with a mocked GitHub client.
+
+    Returns ``(manager, client)`` — see ``tests/conftest.py`` for the
+    typed-mock-client pattern and rationale.  Use ``client`` (not
+    ``mgr._github_client``) for all mock setup and assertions.
+    """
+    # Typed mock client pattern — see tests/conftest.py
+    from tests.conftest import make_merge_manager
+
+    defaults: dict[str, Any] = {"preview_mode": False}
     defaults.update(overrides)
-    mgr = AsyncMergeManager(**defaults)
-    mgr._github_client = AsyncMock()
-    return mgr
+    return make_merge_manager(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -63,23 +69,23 @@ class TestTriggerPostsComment:
 
     @pytest.mark.asyncio
     async def test_posts_trigger_comment_when_status_missing(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
         # Required checks include pre-commit.ci
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
 
         # No statuses reported at all
-        mgr._github_client.get.side_effect = [
+        client.get.side_effect = [
             # commit status endpoint — no statuses
             {"statuses": []},
             # issue comments endpoint — no existing trigger comments
             [],
         ]
 
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         # Mock sleep so the poll loop doesn't actually wait
         with patch("asyncio.sleep", new_callable=AsyncMock):
@@ -88,7 +94,7 @@ class TestTriggerPostsComment:
                 "statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]
             }
             # Append the poll response after the initial two get calls
-            mgr._github_client.get.side_effect = [
+            client.get.side_effect = [
                 # 1st call: commit status check (step 2)
                 {"statuses": []},
                 # 2nd call: issue comments (step 3 - duplicate check)
@@ -100,7 +106,7 @@ class TestTriggerPostsComment:
             result = await mgr._trigger_stale_precommit_ci(pr)
 
         assert result is True
-        mgr._github_client.post_issue_comment.assert_called_once_with(
+        client.post_issue_comment.assert_called_once_with(
             "owner", "repo", 42, "pre-commit.ci run"
         )
 
@@ -114,23 +120,23 @@ class TestStatusAlreadyReported:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("state", ["success", "pending", "failure", "error"])
     async def test_no_comment_when_status_exists(self, state):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.get = AsyncMock(
+        client.get = AsyncMock(
             return_value={
                 "statuses": [{"context": "pre-commit.ci - pr", "state": state}]
             }
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         result = await mgr._trigger_stale_precommit_ci(pr)
 
         assert result is False
-        mgr._github_client.post_issue_comment.assert_not_called()
+        client.post_issue_comment.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +149,9 @@ class TestPreviewModeGuard:
     @pytest.mark.asyncio
     async def test_preview_mode_skips_trigger_via_merge_single_pr(self):
         """_merge_single_pr must not trigger side effects when preview_mode is True."""
-        mgr = _make_manager(preview_mode=True)
+        mgr, client = _make_manager(
+            preview_mode=True
+        )  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
         # Sanity check that we're actually in preview mode.
@@ -151,7 +159,14 @@ class TestPreviewModeGuard:
 
         # Patch the side-effecting method so we can assert it is not called.
         mgr._trigger_stale_precommit_ci = AsyncMock()
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
+
+        # Mock _check_merge_requirements to avoid unawaited-coroutine warnings
+        # from the AsyncMock client (the real method would call async methods on
+        # the mock whose return-value coroutines are never awaited).
+        mgr._check_merge_requirements = AsyncMock(
+            return_value=(True, "mocked for test")
+        )
 
         # Execute the merge flow; preview_mode should prevent side effects.
         # _merge_single_pr will proceed through the flow and eventually
@@ -161,7 +176,7 @@ class TestPreviewModeGuard:
         # In preview mode, neither the retrigger logic nor comment posting
         # should be invoked.
         mgr._trigger_stale_precommit_ci.assert_not_awaited()
-        mgr._github_client.post_issue_comment.assert_not_awaited()
+        client.post_issue_comment.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -172,47 +187,47 @@ class TestDuplicateCommentGuard:
 
     @pytest.mark.asyncio
     async def test_skips_when_trigger_comment_already_exists(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.get.side_effect = [
+        client.get.side_effect = [
             # commit status — missing
             {"statuses": []},
             # existing issue comments — already has a trigger
             [{"body": "pre-commit.ci run"}],
         ]
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         result = await mgr._trigger_stale_precommit_ci(pr)
 
         assert result is False
-        mgr._github_client.post_issue_comment.assert_not_called()
+        client.post_issue_comment.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_posts_when_only_unrelated_comments_exist(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.get.side_effect = [
+        client.get.side_effect = [
             {"statuses": []},
             # Unrelated comments — no trigger
             [{"body": "LGTM"}, {"body": "Please review"}],
             # Poll returns success
             {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]},
         ]
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await mgr._trigger_stale_precommit_ci(pr)
 
         assert result is True
-        mgr._github_client.post_issue_comment.assert_called_once()
+        client.post_issue_comment.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -223,31 +238,31 @@ class TestRequiredCheckNotConfigured:
 
     @pytest.mark.asyncio
     async def test_no_comment_when_not_required(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "ci/build"}, {"context": "ci/lint"}]
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         result = await mgr._trigger_stale_precommit_ci(pr)
 
         assert result is False
-        mgr._github_client.post_issue_comment.assert_not_called()
+        client.post_issue_comment.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_comment_when_no_required_checks(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(return_value=[])
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.get_required_status_checks = AsyncMock(return_value=[])
+        client.post_issue_comment = AsyncMock()
 
         result = await mgr._trigger_stale_precommit_ci(pr)
 
         assert result is False
-        mgr._github_client.post_issue_comment.assert_not_called()
+        client.post_issue_comment.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -258,19 +273,19 @@ class TestPollingBehavior:
 
     @pytest.mark.asyncio
     async def test_polling_returns_true_on_success(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         # Build side effects: status missing, no comments, then 2 pending polls, then success
         pending = {"statuses": [{"context": "pre-commit.ci - pr", "state": "pending"}]}
         success = {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]}
 
-        mgr._github_client.get.side_effect = [
+        client.get.side_effect = [
             {"statuses": []},  # step 2: status check
             [],  # step 3: duplicate comment check
             pending,  # poll 1
@@ -287,16 +302,16 @@ class TestPollingBehavior:
 
     @pytest.mark.asyncio
     async def test_polling_returns_false_on_failure(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         failure = {"statuses": [{"context": "pre-commit.ci - pr", "state": "failure"}]}
-        mgr._github_client.get.side_effect = [
+        client.get.side_effect = [
             {"statuses": []},  # step 2
             [],  # step 3
             failure,  # poll 1: immediate failure
@@ -309,18 +324,18 @@ class TestPollingBehavior:
 
     @pytest.mark.asyncio
     async def test_polling_returns_false_on_error_state(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         error_status = {
             "statuses": [{"context": "pre-commit.ci - pr", "state": "error"}]
         }
-        mgr._github_client.get.side_effect = [
+        client.get.side_effect = [
             {"statuses": []},
             [],
             error_status,
@@ -334,18 +349,18 @@ class TestPollingBehavior:
     @pytest.mark.asyncio
     async def test_polling_timeout(self):
         """After max_polls iterations with only pending, returns False."""
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         pending = {"statuses": [{"context": "pre-commit.ci - pr", "state": "pending"}]}
 
         # step 2 + step 3 + 6 poll iterations (max_polls = 6)
-        mgr._github_client.get.side_effect = [
+        client.get.side_effect = [
             {"statuses": []},
             [],
         ] + [pending] * 6
@@ -360,16 +375,16 @@ class TestPollingBehavior:
     @pytest.mark.asyncio
     async def test_polling_handles_api_errors_gracefully(self):
         """API errors during polling should not crash — polling continues."""
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         success = {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]}
-        mgr._github_client.get.side_effect = [
+        client.get.side_effect = [
             {"statuses": []},  # step 2
             [],  # step 3
             Exception("API error"),  # poll 1: transient error
@@ -390,8 +405,8 @@ class TestNoGitHubClient:
 
     @pytest.mark.asyncio
     async def test_returns_false_without_client(self):
-        mgr = AsyncMergeManager(token="test-token")
-        mgr._github_client = None
+        mgr, _client = _make_manager()  # typed mock client pattern (see conftest.py)
+        mgr._github_client = None  # intentionally set to None for this test
         pr = _make_pr_info()
 
         result = await mgr._trigger_stale_precommit_ci(pr)
@@ -406,17 +421,17 @@ class TestPostCommentFailure:
 
     @pytest.mark.asyncio
     async def test_returns_false_on_post_failure(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.get.side_effect = [
+        client.get.side_effect = [
             {"statuses": []},
             [],  # no existing comments
         ]
-        mgr._github_client.post_issue_comment = AsyncMock(
+        client.post_issue_comment = AsyncMock(
             side_effect=Exception("Permission denied")
         )
 
@@ -426,34 +441,34 @@ class TestPostCommentFailure:
 
     @pytest.mark.asyncio
     async def test_returns_false_when_required_checks_api_fails(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             side_effect=Exception("API unavailable")
         )
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.post_issue_comment = AsyncMock()
 
         result = await mgr._trigger_stale_precommit_ci(pr)
 
         assert result is False
-        mgr._github_client.post_issue_comment.assert_not_called()
+        client.post_issue_comment.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_returns_false_when_status_api_fails(self):
-        mgr = _make_manager()
+        mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
 
-        mgr._github_client.get_required_status_checks = AsyncMock(
+        client.get_required_status_checks = AsyncMock(
             return_value=[{"context": "pre-commit.ci - pr"}]
         )
-        mgr._github_client.get = AsyncMock(side_effect=Exception("Network error"))
-        mgr._github_client.post_issue_comment = AsyncMock()
+        client.get = AsyncMock(side_effect=Exception("Network error"))
+        client.post_issue_comment = AsyncMock()
 
         result = await mgr._trigger_stale_precommit_ci(pr)
 
         assert result is False
-        mgr._github_client.post_issue_comment.assert_not_called()
+        client.post_issue_comment.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

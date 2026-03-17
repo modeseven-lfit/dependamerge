@@ -71,7 +71,7 @@ class TestGitHubAsyncCore:
                 # All should complete successfully
                 results = await asyncio.gather(*tasks)
                 assert len(results) == 4
-                assert all(r["test"] == "data" for r in results)
+                assert all(isinstance(r, dict) and r["test"] == "data" for r in results)
 
                 # Verify requests were made
                 assert mock_client.request.call_count == 4
@@ -104,7 +104,7 @@ class TestGitHubAsyncCore:
                 result = await api.get("/test")
 
                 # Should have succeeded after retry
-                assert result["success"] is True
+                assert isinstance(result, dict) and result["success"] is True
 
                 # Should have made 2 requests (first failed, second succeeded)
                 assert mock_client.request.call_count == 2
@@ -164,7 +164,7 @@ class TestGitHubAsyncCore:
             api = GitHubAsync(token="test_token")
             try:
                 result = await api.get("/test")
-                assert result["recovered"] is True
+                assert isinstance(result, dict) and result["recovered"] is True
                 assert mock_client.request.call_count == 2
             finally:
                 await api.aclose()
@@ -661,7 +661,7 @@ class TestAsyncRetryPatterns:
                 result = await api.get("/test")
 
                 # Should eventually succeed
-                assert result["recovered"] is True
+                assert isinstance(result, dict) and result["recovered"] is True
 
                 # Should have retried (3 total requests)
                 assert mock_client.request.call_count == 3

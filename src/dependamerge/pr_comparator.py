@@ -4,7 +4,7 @@
 import re
 from difflib import SequenceMatcher
 
-from .models import ComparisonResult, PullRequestInfo
+from .models import ComparisonResult, FileChange, PullRequestInfo
 
 
 class PRComparator:
@@ -123,7 +123,7 @@ class PRComparator:
         title = " ".join(title.split())
         return title.lower()
 
-    def _compare_file_changes(self, files1: list, files2: list) -> float:
+    def _compare_file_changes(self, files1: list[FileChange], files2: list[FileChange]) -> float:
         """Compare file changes between PRs."""
         if not files1 or not files2:
             return 0.0

@@ -90,7 +90,7 @@ def _redact_seq(parts: Sequence[str]) -> Sequence[str]:
     return [(_redact(p) if isinstance(p, str) else p) for p in parts]
 
 
-def _build_git_env(env_overrides: dict | None = None, *, lfs_skip: bool = True) -> dict:
+def _build_git_env(env_overrides: dict[str, str] | None = None, *, lfs_skip: bool = True) -> dict[str, str]:
     """Build a safe environment for git invocations."""
     env = os.environ.copy()
 
@@ -174,7 +174,7 @@ def run_git(
     args: Sequence[str],
     *,
     cwd: PathLike | None = None,
-    env_overrides: dict | None = None,
+    env_overrides: dict[str, str] | None = None,
     interactive: bool = False,
     check: bool = True,
     timeout: float | None = None,

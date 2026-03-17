@@ -11,6 +11,8 @@ from dependamerge.models import PullRequestInfo
 
 
 class TestCLI:
+    runner: CliRunner = CliRunner()
+
     def setup_method(self):
         self.runner = CliRunner()
 

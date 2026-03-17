@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from typer.testing import CliRunner
 
 from dependamerge.github2gerrit_detector import (
     _END_MARKER,
@@ -98,12 +100,16 @@ SAMPLE_COMMENT_WITH_GERRIT_URL = (
 )
 
 
-def _make_rest_comment(body: str, author: str = "github-actions[bot]") -> dict:
+def _make_rest_comment(
+    body: str, author: str = "github-actions[bot]"
+) -> dict[str, object]:
     """Build a REST-style comment dict."""
     return {"user": {"login": author}, "body": body, "id": 100}
 
 
-def _make_graphql_comment(body: str, author: str = "github-actions[bot]") -> dict:
+def _make_graphql_comment(
+    body: str, author: str = "github-actions[bot]"
+) -> dict[str, object]:
     """Build a GraphQL-style comment dict."""
     return {
         "author": {"login": author},
@@ -114,7 +120,7 @@ def _make_graphql_comment(body: str, author: str = "github-actions[bot]") -> dic
 
 def _make_pr_info(**overrides) -> PullRequestInfo:
     """Build a minimal PullRequestInfo for testing."""
-    defaults = {
+    defaults: dict[str, Any] = {
         "number": 41,
         "title": "Bump foo from 1.0 to 2.0",
         "body": "Dependabot bump body",
@@ -695,9 +701,9 @@ class TestBotAuthors:
 class TestCLIGitHub2GerritFlags:
     """Test that CLI flags are properly handled."""
 
-    def setup_method(self):
-        from typer.testing import CliRunner
+    runner: CliRunner = CliRunner()
 
+    def setup_method(self):
         self.runner = CliRunner()
 
     def test_mutually_exclusive_flags_submit_and_skip(self):
@@ -810,6 +816,7 @@ class TestMergeManagerDetectGitHub2Gerrit:
 
         result = asyncio.run(mgr._detect_github2gerrit("owner", "repo", 41))
         assert result.has_mapping is True
+        assert result.mapping is not None
         assert result.mapping.topic == "GH-releng-gerrit_to_platform-41"
         mgr._github_client.get.assert_called_once_with(
             "/repos/owner/repo/issues/41/comments"
@@ -892,6 +899,13 @@ class TestMergeManagerIgnoreMode:
         )
         mgr._github_client = AsyncMock()
         mgr._console = MagicMock()
+
+        # Mock _check_merge_requirements to avoid unawaited-coroutine warnings
+        # from the AsyncMock client (the real method would call async methods on
+        # the mock whose return-value coroutines are never awaited).
+        mgr._check_merge_requirements = AsyncMock(
+            return_value=(True, "mocked for test")
+        )
 
         # Mock get to track whether issue comments are fetched
         call_log = []
@@ -1332,9 +1346,12 @@ class TestMergeManagerSubmitGerritChange:
 
     def _make_mgr_with_no_gitreview(self, **kwargs):
         """Create a manager whose GitHub client returns 404 for .gitreview."""
-        defaults = {"token": "test-token", "github2gerrit_mode": "submit"}
-        defaults.update(kwargs)
-        mgr = AsyncMergeManager(**defaults)
+        mgr = AsyncMergeManager(
+            token=kwargs.get("token", "test-token"),
+            github2gerrit_mode=kwargs.get("github2gerrit_mode", "submit"),
+            preview_mode=kwargs.get("preview_mode", False),
+            merge_method=kwargs.get("merge_method", "merge"),
+        )
         mgr._github_client = AsyncMock()
         # .gitreview fetch returns 404 so tests fall through to mocked creds
         original_get = mgr._github_client.get

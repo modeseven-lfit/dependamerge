@@ -10,6 +10,8 @@ from dependamerge.models import OrganizationStatus, RepositoryStatus
 
 
 class TestStatusCommand:
+    runner: CliRunner = CliRunner()
+
     def setup_method(self):
         self.runner = CliRunner()
 
