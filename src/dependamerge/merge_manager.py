@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import time
@@ -117,6 +118,30 @@ class AsyncMergeManager:
 
         # Track last merge exception per PR for better error reporting
         self._last_merge_exception: dict[str, Exception] = {}
+
+        # Track PRs that were just approved (for post-approval merge retry)
+        self._recently_approved: set[str] = set()
+
+        # Delay (seconds) after submitting a new approval before attempting merge.
+        # GitHub needs time to propagate the approval to branch-protection evaluation.
+        default_post_approval_delay = 3.0
+        env_post_approval_delay = os.getenv(
+            "DEPENDAMERGE_POST_APPROVAL_DELAY",
+            str(default_post_approval_delay),
+        )
+        try:
+            parsed_delay = float(env_post_approval_delay)
+            if not math.isfinite(parsed_delay) or parsed_delay < 0:
+                raise ValueError(f"out of range: {parsed_delay}")
+            self._post_approval_delay = parsed_delay
+        except ValueError:
+            self.log.warning(
+                "Invalid DEPENDAMERGE_POST_APPROVAL_DELAY=%r; "
+                "falling back to default of %.1f seconds",
+                env_post_approval_delay,
+                default_post_approval_delay,
+            )
+            self._post_approval_delay = default_post_approval_delay
 
     def _get_mergeability_icon_and_style(
         self, mergeable_state: str | None
@@ -329,7 +354,12 @@ class AsyncMergeManager:
                 query=f"change:{change_id} status:open",
                 limit=5,
                 offset=0,
-                options=["CURRENT_REVISION", "LABELS", "DETAILED_LABELS", "SUBMIT_REQUIREMENTS"],
+                options=[
+                    "CURRENT_REVISION",
+                    "LABELS",
+                    "DETAILED_LABELS",
+                    "SUBMIT_REQUIREMENTS",
+                ],
             )
 
             if not changes:
@@ -491,8 +521,7 @@ class AsyncMergeManager:
             )
             if gitreview_info and gitreview_info.is_valid:
                 self.log.info(
-                    "Resolved Gerrit host from .gitreview in %s/%s: %s "
-                    "(base_path=%s)",
+                    "Resolved Gerrit host from .gitreview in %s/%s: %s (base_path=%s)",
                     repo_owner,
                     repo_name,
                     gitreview_info.host,
@@ -514,11 +543,15 @@ class AsyncMergeManager:
             )
             if gerrit_url_match:
                 host = gerrit_url_match.group(1)
-                base_path = gerrit_url_match.group(2) if gerrit_url_match.group(2) else None
+                base_path = (
+                    gerrit_url_match.group(2) if gerrit_url_match.group(2) else None
+                )
                 return host, base_path
 
         # 4. Well-known LF Gerrit host
-        if (mapping.pr_url and "github.com/lfit/" in mapping.pr_url) or repo_owner == "lfit":
+        if (
+            mapping.pr_url and "github.com/lfit/" in mapping.pr_url
+        ) or repo_owner == "lfit":
             return "gerrit.linuxfoundation.org", "infra"
 
         # 5. GERRIT_URL environment variable (catch-all)
@@ -526,7 +559,9 @@ class AsyncMergeManager:
         if gerrit_url:
             url_match = re.match(r"https?://([^/]+)(?:/([\w-]+))?/?$", gerrit_url)
             if url_match:
-                return url_match.group(1), url_match.group(2) if url_match.group(2) else None
+                return url_match.group(1), url_match.group(2) if url_match.group(
+                    2
+                ) else None
 
         return None, None
 
@@ -610,9 +645,7 @@ class AsyncMergeManager:
 
                     # Gerrit submission failed - report as failed
                     result.status = MergeStatus.FAILED
-                    result.error = (
-                        f"Failed to submit Gerrit change ({skip_msg})"
-                    )
+                    result.error = f"Failed to submit Gerrit change ({skip_msg})"
                     if self.progress_tracker:
                         self.progress_tracker.merge_failure()
                     self._console.print(
@@ -816,9 +849,19 @@ class AsyncMergeManager:
                 approval_added = await self._approve_pr(
                     repo_owner, repo_name, pr_info.number
                 )
-                if not approval_added:
-                    # Already approved, no need to log additional approval
-                    pass
+                if approval_added:
+                    # Track that we just approved this PR so that the merge
+                    # retry logic knows a propagation delay may be needed.
+                    pr_key = f"{repo_owner}/{repo_name}#{pr_info.number}"
+                    self._recently_approved.add(pr_key)
+
+                    # Give GitHub time to propagate the approval to branch
+                    # protection evaluation before attempting the merge.
+                    if self._post_approval_delay > 0:
+                        self.log.debug(
+                            f"Waiting {self._post_approval_delay}s for approval propagation on {pr_key}"
+                        )
+                        await asyncio.sleep(self._post_approval_delay)
             result.status = MergeStatus.APPROVED
 
             # Step 5: Handle rebase if needed before merge
@@ -1025,18 +1068,17 @@ class AsyncMergeManager:
                     # that failed due to unsigned commits.  If so, ask
                     # dependabot to recreate the PR and merge the new one.
                     recreated_pr = None
-                    if (
-                        pr_info.author == "dependabot[bot]"
-                        and not self.preview_mode
-                    ):
+                    if pr_info.author == "dependabot[bot]" and not self.preview_mode:
                         if "branch protection" in failure_reason.lower():
-                            recreated_pr = (
-                                await self._trigger_dependabot_recreate(pr_info)
+                            recreated_pr = await self._trigger_dependabot_recreate(
+                                pr_info
                             )
 
                     if recreated_pr is not None:
                         # We have a fresh PR — approve and merge it
-                        new_owner, new_repo = recreated_pr.repository_full_name.split("/", 1)
+                        new_owner, new_repo = recreated_pr.repository_full_name.split(
+                            "/", 1
+                        )
                         await self._approve_pr(new_owner, new_repo, recreated_pr.number)
 
                         new_merge_method = self._pr_merge_methods.get(
@@ -1046,7 +1088,10 @@ class AsyncMergeManager:
                             if self._github_client is None:
                                 raise RuntimeError("GitHub client not initialized")
                             new_merged = await self._github_client.merge_pull_request(
-                                new_owner, new_repo, recreated_pr.number, new_merge_method
+                                new_owner,
+                                new_repo,
+                                recreated_pr.number,
+                                new_merge_method,
                             )
                         except Exception as merge_err:
                             self.log.error(
@@ -1152,6 +1197,9 @@ class AsyncMergeManager:
 
         finally:
             result.duration = time.time() - start_time
+            # Clean up recently-approved tracking to avoid unbounded growth
+            pr_key = f"{repo_owner}/{repo_name}#{pr_info.number}"
+            self._recently_approved.discard(pr_key)
 
         return result
 
@@ -1387,9 +1435,7 @@ class AsyncMergeManager:
 
         return True, "All merge requirements appear to be met"
 
-    async def _trigger_stale_precommit_ci(
-        self, pr_info: PullRequestInfo
-    ) -> bool:
+    async def _trigger_stale_precommit_ci(self, pr_info: PullRequestInfo) -> bool:
         """
         Detect and retrigger a stuck pre-commit.ci run by posting a comment.
 
@@ -1596,10 +1642,11 @@ class AsyncMergeManager:
 
         # 3. Check whether any commits are unverified
         try:
-            all_verified, unverified_shas = (
-                await self._github_client.check_pr_commit_signatures(
-                    repo_owner, repo_name, pr_info.number
-                )
+            (
+                all_verified,
+                unverified_shas,
+            ) = await self._github_client.check_pr_commit_signatures(
+                repo_owner, repo_name, pr_info.number
             )
             if all_verified:
                 self.log.debug(
@@ -1713,9 +1760,7 @@ class AsyncMergeManager:
                         for pr_data in prs:
                             if not isinstance(pr_data, dict):
                                 continue
-                            pr_author = (
-                                pr_data.get("user", {}).get("login", "")
-                            )
+                            pr_author = pr_data.get("user", {}).get("login", "")
                             if pr_author != "dependabot[bot]":
                                 continue
 
@@ -1791,7 +1836,9 @@ class AsyncMergeManager:
             return None
 
         full_name = f"{repo_owner}/{repo_name}"
-        html_url = pr_data.get("html_url", f"https://github.com/{full_name}/pull/{new_number}")
+        html_url = pr_data.get(
+            "html_url", f"https://github.com/{full_name}/pull/{new_number}"
+        )
 
         log_and_print(
             self.log,
@@ -2103,8 +2150,84 @@ class AsyncMergeManager:
                     if "behind" in error_msg.lower() and self.fix_out_of_date:
                         # Allow retry for behind PRs
                         pass
+                    elif pr_info.mergeable_state in ("clean", "unstable"):
+                        # The PR should be mergeable but GitHub returned 405 —
+                        # this is a transient API error (often follows a 502
+                        # during GitHub degradation).  Re-fetch state and retry.
+                        if attempt < self.max_retries:
+                            retry_delay = 3.0 * (attempt + 1)
+                            self.log.info(
+                                f"Transient 405 on mergeable PR {pr_key} "
+                                f"(state={pr_info.mergeable_state}), "
+                                f"waiting {retry_delay}s before retry "
+                                f"(attempt {attempt + 1}/{self.max_retries + 1})…"
+                            )
+                            await asyncio.sleep(retry_delay)
+                            # Refresh PR state in case something changed
+                            try:
+                                if self._github_client:
+                                    refreshed = await self._github_client.get(
+                                        f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
+                                    )
+                                    if isinstance(refreshed, dict):
+                                        pr_info.mergeable = refreshed.get("mergeable")
+                                        pr_info.mergeable_state = refreshed.get(
+                                            "mergeable_state"
+                                        )
+                                        self.log.debug(
+                                            f"Refreshed {pr_key}: mergeable={pr_info.mergeable}, "
+                                            f"mergeable_state={pr_info.mergeable_state}"
+                                        )
+                            except Exception as refresh_err:
+                                self.log.debug(
+                                    f"Failed to refresh PR state for {pr_key}: {refresh_err}"
+                                )
+                            continue
+                        else:
+                            break
                     elif pr_info.mergeable_state == "blocked":
-                        # Don't retry immediately - status checks need more time
+                        # If we just approved this PR, the branch protection
+                        # evaluator may not have caught up yet.  Re-fetch the
+                        # PR state and, if it has become "clean", allow a retry
+                        # instead of giving up immediately.
+                        if (
+                            pr_key in self._recently_approved
+                            and attempt < self.max_retries
+                        ):
+                            try:
+                                if self._github_client:
+                                    if self._post_approval_delay <= 0:
+                                        retry_delay = 0.0
+                                    else:
+                                        retry_delay = self._post_approval_delay + 2.0
+                                    self.log.info(
+                                        f"Post-approval propagation retry for {pr_key}, "
+                                        f"waiting {retry_delay}s before re-checking…"
+                                    )
+                                    if retry_delay > 0:
+                                        await asyncio.sleep(retry_delay)
+                                    refreshed = await self._github_client.get(
+                                        f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
+                                    )
+                                    if isinstance(refreshed, dict):
+                                        new_state = refreshed.get("mergeable_state")
+                                        new_mergeable = refreshed.get("mergeable")
+                                        self.log.info(
+                                            f"Refreshed {pr_key}: mergeable={new_mergeable}, "
+                                            f"mergeable_state={new_state}"
+                                        )
+                                        pr_info.mergeable = new_mergeable
+                                        pr_info.mergeable_state = new_state
+                                        if new_state == "clean":
+                                            # Approval has propagated — retry the merge
+                                            continue
+                            except Exception as refresh_err:
+                                self.log.debug(
+                                    f"Failed to refresh PR state for {pr_key}: {refresh_err}"
+                                )
+                            # Remove from recently-approved so we don't loop forever
+                            self._recently_approved.discard(pr_key)
+                        # Still blocked after re-check (or not recently approved)
                         break
                     else:
                         # Don't retry 405 errors unless they're "behind" issues
@@ -2175,6 +2298,23 @@ class AsyncMergeManager:
             # Check for other permission errors
             elif "403" in error_msg and "forbidden" in error_msg.lower():
                 return "insufficient permissions"
+            # Surface transient HTTP errors (502, 405 etc.) accurately instead
+            # of falling through to infer a reason from mergeable_state, which
+            # may be stale or misleading (e.g. "clean" → "branch protection").
+            elif "405" in error_msg and "Method Not Allowed" in error_msg:
+                if pr_info.mergeable_state in ("clean", "unstable"):
+                    return (
+                        "GitHub API returned transient 405 error "
+                        "(PR appears mergeable — GitHub may be experiencing issues, "
+                        "see https://www.githubstatus.com)"
+                    )
+                # For non-clean states, fall through to state-based analysis below
+            elif "502" in error_msg:
+                return (
+                    "GitHub API returned 502 Bad Gateway "
+                    "(GitHub may be experiencing issues, "
+                    "see https://www.githubstatus.com)"
+                )
 
         if pr_info.mergeable_state == "behind":
             return "behind base branch"
@@ -2387,8 +2527,10 @@ class AsyncMergeManager:
                     block_reason = ""
                     if head_sha and self._github_client:
                         try:
-                            block_reason = await self._github_client.analyze_block_reason(
-                                owner, repo, pr_number, head_sha
+                            block_reason = (
+                                await self._github_client.analyze_block_reason(
+                                    owner, repo, pr_number, head_sha
+                                )
                             )
                             self.log.debug(
                                 f"PR {owner}/{repo}#{pr_number} block reason: {block_reason}"
@@ -2412,7 +2554,10 @@ class AsyncMergeManager:
                             f"Force level '{self.force_level}' bypassing branch protection rules for {owner}/{repo}#{pr_number}"
                         )
                         return True, "branch protection bypassed by force level"
-                    return False, f"branch protection rules prevent merge ({block_reason or 'blocked'})"
+                    return (
+                        False,
+                        f"branch protection rules prevent merge ({block_reason or 'blocked'})",
+                    )
                 elif mergeable_state == "dirty":
                     return False, "merge conflicts"
                 elif mergeable_state == "behind":
