@@ -485,6 +485,8 @@ def _fetch_and_validate_source_pr(ctx: _MergeContext) -> None:
                 exception=e,
             )
 
+    assert ctx.source_pr is not None
+
     _display_pr_info(
         ctx.source_pr,
         "",
