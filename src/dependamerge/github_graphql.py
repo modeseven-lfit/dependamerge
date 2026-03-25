@@ -21,11 +21,15 @@ __all__ = [
     "GET_BRANCH_PROTECTION",
 ]
 
-# Lightweight query to list repositories without PR nodes for accurate counting
+# Lightweight query to list repositories without PR nodes for accurate counting.
+# totalCount is provided by the GitHub GraphQL API for free on connection
+# objects, so the first page immediately reveals the org-wide repo total
+# without requiring a separate counting pass.
 ORG_REPOS_ONLY = """
 query($org: String!, $reposCursor: String) {
   organization(login: $org) {
     repositories(first: 100, after: $reposCursor, orderBy: { field: NAME, direction: ASC }) {
+      totalCount
       pageInfo {
         hasNextPage
         endCursor

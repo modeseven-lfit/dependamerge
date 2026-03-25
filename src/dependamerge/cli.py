@@ -615,55 +615,15 @@ def _scan_and_find_similar(ctx: _MergeContext) -> None:
 
     if ctx.progress_tracker:
         ctx.progress_tracker.update_operation(
-            "Getting organization repositories..."
+            "Scanning repositories..."
         )
     else:
         console.print(f"\nChecking organization: {ctx.owner}")
 
-    try:
-        repositories = (
-            ctx.github_client.get_organization_repositories(ctx.owner)
-        )
-    except (
-        urllib3.exceptions.NameResolutionError,
-        urllib3.exceptions.MaxRetryError,
-        requests.exceptions.ConnectionError,
-        requests.exceptions.Timeout,
-        requests.exceptions.RequestException,
-    ) as e:
-        if is_network_error(e):
-            exit_with_error(
-                ExitCode.NETWORK_ERROR,
-                details=(
-                    "Failed to fetch organization repositories "
-                    "from GitHub API"
-                ),
-                exception=e,
-            )
-        elif is_github_api_permission_error(e):
-            exit_for_github_api_error(
-                details="Failed to fetch organization repositories",
-                exception=e,
-            )
-        else:
-            exit_with_error(
-                ExitCode.GENERAL_ERROR,
-                message=(
-                    "❌ Failed to fetch organization repositories"
-                ),
-                details=str(e),
-                exception=e,
-            )
-        repositories = []  # unreachable; exit_with_error raises
-
-    total_repos = len(repositories)
-    console.print(f"Found {total_repos} repositories")
-
-    if ctx.progress_tracker:
-        ctx.progress_tracker.update_total_repositories(total_repos)
-        ctx.progress_tracker.update_operation(
-            "Scanning repositories..."
-        )
+    # Repository enumeration and counting is handled internally
+    # by GitHubService via a single-pass GraphQL query that
+    # extracts totalCount on the first page and feeds it to the
+    # progress tracker automatically.
 
     from .github_service import GitHubService
 
