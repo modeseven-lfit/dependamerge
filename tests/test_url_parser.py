@@ -516,15 +516,21 @@ class TestUrlBypassPrevention:
         with pytest.raises(UrlParseError, match="Cannot determine platform"):
             parse_change_url(url)
 
-    def test_rejects_github_com_as_subdomain_suffix(self):
-        """Test that github.com.attacker.net is rejected."""
+    def test_github_com_subdomain_suffix_uses_ghe_heuristic(self):
+        """Test that github.com.attacker.net is NOT matched as github.com.
+
+        The exact-match check for github.com correctly rejects this
+        host.  However, the /pull/ path-based heuristic for GitHub
+        Enterprise still matches, so the URL parses as a GHE instance
+        with the attacker's hostname.  Callers that care about the
+        canonical github.com should compare result.host explicitly.
+        """
         url = "https://github.com.attacker.net/owner/repo/pull/1"
-        # This should NOT match github.com — the /pull/ path will
-        # cause it to be treated as GitHub, but the host is wrong.
-        # Since /pull/ is a path-based heuristic for GHE, this will
-        # parse successfully but with the attacker's hostname.
         result = parse_change_url(url)
+        # Hostname must NOT be normalised to "github.com"
         assert result.host == "github.com.attacker.net"
+        # Classified via the GHE /pull/ path heuristic, not the
+        # exact github.com host match
         assert result.source == ChangeSource.GITHUB
 
     def test_rejects_gerrit_substring_in_hostname(self):

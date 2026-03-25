@@ -619,7 +619,9 @@ def _scan_and_find_similar(ctx: _MergeContext) -> None:
         console.print(f"\nChecking organization: {ctx.owner}")
 
     try:
-        ctx.github_client.get_organization_repositories(ctx.owner)
+        repositories = (
+            ctx.github_client.get_organization_repositories(ctx.owner)
+        )
     except (
         urllib3.exceptions.NameResolutionError,
         urllib3.exceptions.MaxRetryError,
@@ -650,26 +652,15 @@ def _scan_and_find_similar(ctx: _MergeContext) -> None:
                 details=str(e),
                 exception=e,
             )
+        repositories = []  # unreachable; exit_with_error raises
 
-    if ctx.progress_tracker:
-        ctx.progress_tracker.update_operation(
-            "Listing repositories..."
-        )
-
-    repositories = ctx.github_client.get_organization_repositories(
-        ctx.owner
-    )
     total_repos = len(repositories)
     console.print(f"Found {total_repos} repositories")
 
     if ctx.progress_tracker:
         ctx.progress_tracker.update_total_repositories(total_repos)
-    else:
-        console.print(f"Found {total_repos} repositories")
-
-    if ctx.progress_tracker:
         ctx.progress_tracker.update_operation(
-            "Listing repositories..."
+            "Scanning repositories..."
         )
 
     from .github_service import GitHubService
@@ -1297,7 +1288,7 @@ def merge(
 
     # --- GitHub merge flow ---
     ctx = _MergeContext(
-        pr_url=pr_url,
+        pr_url=parsed_url.original_url,
         no_confirm=no_confirm,
         similarity_threshold=similarity_threshold,
         merge_method=merge_method,

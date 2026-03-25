@@ -747,7 +747,8 @@ def resolve_gerrit_credentials(
                     # SECURITY: Do not log credential values.
                     # See CodeQL rule py/clear-text-logging-sensitive-data.
                     log.debug(
-                        "Using credentials from .netrc for host %s",
+                        "Using credentials from .netrc file %s for host %s",
+                        netrc_path,
                         normalized_host,
                     )
                     return GerritCredentials(

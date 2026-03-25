@@ -131,10 +131,10 @@ def parse_change_url(url: str) -> ParsedUrl:
     except Exception as exc:
         raise UrlParseError(f"Invalid URL format: {exc}") from exc
 
-    if not parsed.netloc:
+    if not parsed.hostname:
         raise UrlParseError("URL must include a hostname")
 
-    host = parsed.netloc.lower()
+    host = parsed.hostname.lower()
     path = parsed.path.rstrip("/")
 
     # Detect platform based on URL characteristics
@@ -299,7 +299,7 @@ def detect_source(url: str) -> ChangeSource:
     except Exception as exc:
         raise UrlParseError(f"Invalid URL format: {exc}") from exc
 
-    host = parsed.netloc.lower()
+    host = parsed.hostname.lower() if parsed.hostname else ""
     path = parsed.path.rstrip("/")
 
     if _is_github_url(host, path):
