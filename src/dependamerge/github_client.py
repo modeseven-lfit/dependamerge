@@ -5,6 +5,7 @@ import asyncio
 import os
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
+from urllib.parse import urlparse
 
 from .models import (
     FileChange,
@@ -12,6 +13,7 @@ from .models import (
     PullRequestInfo,
     ReviewInfo,
 )
+from .url_parser import _host_matches
 
 if TYPE_CHECKING:
     from .progress_tracker import ProgressTracker
@@ -29,18 +31,32 @@ class GitHubClient:
             )
         self.token: str = resolved
 
+    def __repr__(self) -> str:
+        """Safe repr that never exposes the token value."""
+        return "GitHubClient(token=***)"
+
     def parse_pr_url(self, url: str) -> tuple[str, str, int]:
         """Parse GitHub PR URL to extract owner, repo, and PR number."""
-        # Expected format: https://github.com/owner/repo/pull/123[/files|/commits|etc]
-        parts = url.rstrip("/").split("/")
-        if len(parts) < 7 or "github.com" not in url or "pull" not in parts:
+        # SECURITY: Use urlparse for host extraction, not substring checks.
+        # See CodeQL rule py/incomplete-url-substring-sanitization.
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if not _host_matches(host, "github.com"):
             raise ValueError(f"Invalid GitHub PR URL: {url}")
 
-        # Find the 'pull' segment and get the PR number from the next segment
+        # Use parsed.path to ignore query strings and fragments
+        # when splitting.
+        parts = parsed.path.strip("/").split("/")
+        if "pull" not in parts:
+            raise ValueError(f"Invalid GitHub PR URL: {url}")
+
+        # Find the 'pull' segment and get the PR number
         try:
             pull_index = parts.index("pull")
             if pull_index + 1 >= len(parts):
-                raise ValueError("PR number not found after 'pull'")
+                raise ValueError(
+                    "PR number not found after 'pull'"
+                )
 
             owner = parts[pull_index - 2]
             repo = parts[pull_index - 1]

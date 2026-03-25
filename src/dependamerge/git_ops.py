@@ -55,13 +55,15 @@ __all__ = [
 # Type aliases
 PathLike = str | Path
 
-# Token redaction patterns
-# - GitHub tokens: ghp_xxx
-# - Basic auth in URL: http[s]://user:password@host
-# - x-access-token inline in URL: x-access-token:<token>@
+# SECURITY: Token redaction patterns cover all known GitHub token formats,
+# GitLab tokens, and JWT-like tokens. Keep this list up to date when new
+# token prefixes are introduced. See git_ops module docstring for design goals.
 _TOKEN_PATTERNS = [
-    re.compile(r"ghp_[A-Za-z0-9]{20,}", re.IGNORECASE),
-    re.compile(r"glpat-[A-Za-z0-9_-]{20,}", re.IGNORECASE),  # GitLab
+    re.compile(r"ghp_[A-Za-z0-9]{20,}", re.IGNORECASE),  # GitHub PAT (classic)
+    re.compile(r"ghs_[A-Za-z0-9]{20,}", re.IGNORECASE),  # GitHub App installation
+    re.compile(r"ghu_[A-Za-z0-9]{20,}", re.IGNORECASE),  # GitHub user-to-server
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}", re.IGNORECASE),  # fine-grained
+    re.compile(r"glpat-[A-Za-z0-9_-]{20,}", re.IGNORECASE),  # GitLab PAT
     # JWT-like long tokens (best-effort)
     re.compile(r"[A-Za-z0-9-_]{20,}\.[A-Za-z0-9-_]{20,}\.[A-Za-z0-9-_]{10,}"),
 ]
@@ -137,7 +139,10 @@ class GitError(RuntimeError):
         super().__init__(
             f"{message}\n  cmd: {redacted_cmd}\n  exit: {returncode}\n  stderr: {redacted_err.strip()}"
         )
-        self.args_vec = tuple(args)
+        # SECURITY: Redact args_vec to prevent token leakage if callers
+        # inspect exception attributes. Command args may contain tokens
+        # embedded in clone URLs (e.g., x-access-token:<token>@host).
+        self.args_vec = tuple(_redact(str(a)) for a in args)
         self.returncode = returncode
         self.stdout = redacted_out
         self.stderr = redacted_err

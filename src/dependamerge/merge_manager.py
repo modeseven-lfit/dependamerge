@@ -143,6 +143,10 @@ class AsyncMergeManager:
             )
             self._post_approval_delay = default_post_approval_delay
 
+    def __repr__(self) -> str:
+        """Safe repr that never exposes the token value."""
+        return "AsyncMergeManager(token=***)"
+
     def _get_mergeability_icon_and_style(
         self, mergeable_state: str | None
     ) -> tuple[str, str | None]:

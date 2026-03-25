@@ -8,11 +8,11 @@ import json
 import logging
 import os
 import time
-from urllib.parse import quote
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import (
     Any,
 )
+from urllib.parse import quote
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -257,6 +257,10 @@ class GitHubAsync:
             verify=verify,
             mounts=mounts,
         )
+
+    def __repr__(self) -> str:
+        """Safe repr that never exposes the token value."""
+        return f"GitHubAsync(api_url={self.api_url!r}, token=***)"
 
     async def __aenter__(self) -> GitHubAsync:
         return self

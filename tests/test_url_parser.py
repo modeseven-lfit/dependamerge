@@ -13,6 +13,7 @@ from dependamerge.url_parser import (
     ChangeSource,
     ParsedUrl,
     UrlParseError,
+    _host_matches,
     detect_source,
     parse_change_url,
 )
@@ -266,22 +267,34 @@ class TestInvalidUrls:
 
     def test_invalid_gerrit_path(self):
         """Test that invalid Gerrit path raises UrlParseError."""
-        # This URL has 'gerrit' in hostname but lacks the /c/.../+/ pattern
-        # so it's detected as Gerrit but fails to parse
+        # This URL has /changes/ prefix so it is detected as Gerrit,
+        # but /changes/12345 does not match the /c/.../+/ regex so
+        # parsing fails with an invalid format error.
         url = "https://gerrit.example.org/changes/12345"
         with pytest.raises(UrlParseError, match="Invalid Gerrit change URL format"):
             parse_change_url(url)
 
     def test_gerrit_missing_change_number(self):
         """Test that Gerrit URL without change number raises error."""
+        # After trailing-slash stripping the path becomes /c/project/+
+        # which no longer contains /+/ so the URL is not recognised as
+        # Gerrit at all — it falls through to "Cannot determine platform".
         url = "https://gerrit.example.org/c/project/+/"
-        with pytest.raises(UrlParseError, match="Invalid Gerrit change URL format"):
+        with pytest.raises(UrlParseError, match="Cannot determine platform"):
             parse_change_url(url)
 
     def test_unknown_platform(self):
         """Test that unknown platform raises UrlParseError."""
-        url = "https://unknown-review.example.org/changes/123"
+        url = "https://unknown-review.example.org/some/path"
         with pytest.raises(UrlParseError, match="Cannot determine platform"):
+            parse_change_url(url)
+
+    def test_changes_path_detected_as_gerrit(self):
+        """Test that /changes/ path prefix triggers Gerrit detection."""
+        # The /changes/ REST API pattern is now a Gerrit heuristic,
+        # but it does not match the /c/.../+/ regex so parsing fails.
+        url = "https://unknown-review.example.org/changes/123"
+        with pytest.raises(UrlParseError, match="Invalid Gerrit change URL format"):
             parse_change_url(url)
 
     def test_url_without_hostname(self):
@@ -420,3 +433,109 @@ class TestEdgeCases:
         result = parse_change_url(url)
 
         assert result.project == "org/division/team/project"
+
+
+class TestHostMatches:
+    """Tests for the _host_matches secure hostname comparison.
+
+    SECURITY: These tests verify that hostname matching uses exact
+    comparison (not substring checks) to prevent bypass attacks.
+    See CodeQL rule py/incomplete-url-substring-sanitization.
+    """
+
+    def test_exact_match(self):
+        """Test exact hostname match."""
+        assert _host_matches("github.com", "github.com") is True
+
+    def test_subdomain_match(self):
+        """Test subdomain matching with leading dot."""
+        assert _host_matches("api.github.com", "github.com") is True
+
+    def test_deep_subdomain_match(self):
+        """Test deeply nested subdomain matching."""
+        assert _host_matches("a.b.c.github.com", "github.com") is True
+
+    def test_case_insensitive(self):
+        """Test case-insensitive comparison."""
+        assert _host_matches("GitHub.COM", "github.com") is True
+        assert _host_matches("github.com", "GitHub.COM") is True
+
+    def test_no_subdomain_matching(self):
+        """Test disabling subdomain matching."""
+        assert (
+            _host_matches("api.github.com", "github.com", allow_subdomains=False)
+            is False
+        )
+        assert _host_matches("github.com", "github.com", allow_subdomains=False) is True
+
+    def test_rejects_substring_bypass(self):
+        """Test that substring bypass attacks are rejected."""
+        # evil-github.com should NOT match github.com
+        assert _host_matches("evil-github.com", "github.com") is False
+
+    def test_rejects_prefix_bypass(self):
+        """Test that prefix-appended bypass is rejected."""
+        # github.com.attacker.net should NOT match github.com
+        assert _host_matches("github.com.attacker.net", "github.com") is False
+
+    def test_rejects_suffix_bypass(self):
+        """Test that suffix-appended bypass is rejected."""
+        # notgithub.com should NOT match github.com
+        assert _host_matches("notgithub.com", "github.com") is False
+
+    def test_empty_hostname(self):
+        """Test that empty hostname returns False."""
+        assert _host_matches("", "github.com") is False
+
+    def test_empty_target(self):
+        """Test that empty target returns False."""
+        assert _host_matches("github.com", "") is False
+
+    def test_both_empty(self):
+        """Test that both empty returns False."""
+        assert _host_matches("", "") is False
+
+
+class TestUrlBypassPrevention:
+    """Tests that crafted URLs cannot bypass platform detection.
+
+    SECURITY: These tests verify that the URL parser correctly
+    rejects URLs designed to exploit substring matching.
+    See CodeQL rule py/incomplete-url-substring-sanitization.
+    """
+
+    def test_rejects_evil_github_hostname(self):
+        """Test that evil-github.com is not treated as GitHub."""
+        url = "https://evil-github.com/owner/repo/issues/123"
+        with pytest.raises(UrlParseError, match="Cannot determine platform"):
+            parse_change_url(url)
+
+    def test_rejects_github_com_in_path(self):
+        """Test that github.com in path does not trick detection."""
+        url = "https://evil.com/github.com/owner/repo"
+        with pytest.raises(UrlParseError, match="Cannot determine platform"):
+            parse_change_url(url)
+
+    def test_github_com_subdomain_suffix_uses_ghe_heuristic(self):
+        """Test that github.com.attacker.net is NOT matched as github.com.
+
+        The exact-match check for github.com correctly rejects this
+        host.  However, the /pull/ path-based heuristic for GitHub
+        Enterprise still matches, so the URL parses as a GHE instance
+        with the attacker's hostname.  Callers that care about the
+        canonical github.com should compare result.host explicitly.
+        """
+        url = "https://github.com.attacker.net/owner/repo/pull/1"
+        result = parse_change_url(url)
+        # Hostname must NOT be normalised to "github.com"
+        assert result.host == "github.com.attacker.net"
+        # Classified via the GHE /pull/ path heuristic, not the
+        # exact github.com host match
+        assert result.source == ChangeSource.GITHUB
+
+    def test_rejects_gerrit_substring_in_hostname(self):
+        """Test that bare 'gerrit' substring no longer triggers detection."""
+        # Previously, "gerrit" in host would match. Now it does not.
+        url = "https://not-a-gerrit-server.evil.org/dashboard"
+        with pytest.raises(UrlParseError, match="Cannot determine platform"):
+            parse_change_url(url)

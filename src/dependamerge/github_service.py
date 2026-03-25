@@ -157,12 +157,9 @@ class GitHubService:
         scanned_repositories = 0
         total_prs = 0
 
-        # First pass to count repositories (for more accurate progress UI)
-        total_repositories = await self._count_org_repositories(org)
-        if self._progress:
-            self._progress.update_total_repositories(total_repositories)
-
-        # Second pass: process repositories with bounded parallelism
+        # Process repositories with bounded parallelism
+        # (repo total is set automatically by _iter_org_repositories
+        # on the first GraphQL page via totalCount)
         async def process_repo(
             repo_node: dict[str, Any],
         ) -> tuple[list[UnmergeablePR], int, int, list[str]]:
@@ -228,6 +225,8 @@ class GitHubService:
         async for repo in self._iter_org_repositories_with_open_prs(org):
             tasks.append(asyncio.create_task(process_repo(repo)))
 
+        total_repositories = len(tasks)
+
         if tasks:
             results = await asyncio.gather(*tasks)
             for repo_unmergeables, repo_prs_count, scanned_inc, repo_errors in results:
@@ -251,39 +250,39 @@ class GitHubService:
     # Iterators and pagination for repos and repo PRs
     # -------------------------------------------------
 
-    async def _count_org_repositories(self, org: str) -> int:
-        """Count repositories using a lightweight query that does not fetch PR nodes."""
-        count = 0
-        cursor: str | None = None
-        while True:
-            data = await self._api.graphql(
-                ORG_REPOS_ONLY, {"org": org, "reposCursor": cursor}
-            )
-            repos = ((data or {}).get("organization") or {}).get("repositories") or {}
-            nodes: list[dict[str, Any]] = repos.get("nodes", []) or []
-            for repo in nodes:
-                if repo.get("isArchived"):
-                    continue
-                count += 1
-            page_info = repos.get("pageInfo") or {}
-            if not page_info.get("hasNextPage"):
-                break
-            cursor = page_info.get("endCursor")
-        return count
-
     async def _iter_org_repositories(self, org: str) -> AsyncIterator[dict[str, Any]]:
-        """
-        Iterate repositories in an organization.
+        """Iterate non-archived repositories, setting the progress total on the first page.
 
-        Yields repository nodes. Filters out archived repositories.
+        The ``ORG_REPOS_ONLY`` query now returns ``totalCount`` on
+        the ``repositories`` connection, so the very first page
+        gives us an accurate denominator for the progress bar
+        without a separate counting pass.
+
+        This replaces the former two-method design
+        (``_count_org_repositories`` + old ``_iter_org_repositories``)
+        with a single GraphQL pagination pass, cutting API calls by
+        roughly one-third for org-wide operations.
         """
         cursor: str | None = None
+        total_set = False
         while True:
             variables = {"org": org, "reposCursor": cursor}
             data = await self._api.graphql(ORG_REPOS_ONLY, variables)
-            repos = ((data or {}).get("organization") or {}).get("repositories") or {}
-            nodes: list[dict[str, Any]] = repos.get("nodes", []) or []
+            repos = (
+                ((data or {}).get("organization") or {}).get("repositories") or {}
+            )
 
+            # On the first page, publish the total to the progress
+            # tracker so the percentage display is immediately
+            # accurate.  totalCount includes archived repos, but
+            # the denominator is close enough for a progress bar.
+            if not total_set:
+                total_count = repos.get("totalCount")
+                if total_count is not None and self._progress:
+                    self._progress.update_total_repositories(total_count)
+                total_set = True
+
+            nodes: list[dict[str, Any]] = repos.get("nodes", []) or []
             for repo in nodes:
                 if repo.get("isArchived"):
                     continue
@@ -545,15 +544,8 @@ class GitHubService:
         """
         results: list[tuple[PullRequestInfo, ComparisonResult]] = []
 
-        # Set total repositories for the progress display
-        try:
-            total_repos = await self._count_org_repositories(org)
-            if self._progress:
-                self._progress.update_total_repositories(total_repos)
-        except Exception:
-            # Non-fatal; continue without repo total
-            pass
-
+        # Repo total is set automatically by _iter_org_repositories
+        # on the first GraphQL page via totalCount.
         async for repo in self._iter_org_repositories_with_open_prs(org):
             repo_full_name = repo.get("nameWithOwner") or ""
             if not repo_full_name or "/" not in repo_full_name:
@@ -1002,12 +994,9 @@ class GitHubService:
         total_repositories = 0
         scanned_repositories = 0
 
-        # Count total repositories
-        total_repositories = await self._count_org_repositories(org)
-        if self._progress:
-            self._progress.update_total_repositories(total_repositories)
-
         # Process repositories with bounded parallelism
+        # (repo total is set automatically by _iter_org_repositories
+        # on the first GraphQL page via totalCount)
         async def process_repo_status(
             repo_node: dict[str, Any],
         ) -> tuple[RepositoryStatus | None, int, list[str]]:
@@ -1057,6 +1046,8 @@ class GitHubService:
         tasks: list[asyncio.Task[Any]] = []
         async for repo in self._iter_org_repositories(org):
             tasks.append(asyncio.create_task(process_repo_status(repo)))
+
+        total_repositories = len(tasks)
 
         if tasks:
             results = await asyncio.gather(*tasks)

@@ -30,20 +30,18 @@ class TestAsyncIntegration:
         """Test scanning an empty organization."""
         service = GitHubService(token="test_token")
 
-        with patch.object(service, "_count_org_repositories", return_value=0):
+        async def empty_repos(org):
+            return
+            yield  # This will never execute, making it an empty generator
 
-            async def empty_repos(org):
-                return
-                yield  # This will never execute, making it an empty generator
+        service._iter_org_repositories_with_open_prs = empty_repos
 
-            service._iter_org_repositories_with_open_prs = empty_repos
+        result = await service.scan_organization("empty-org")
 
-            result = await service.scan_organization("empty-org")
-
-            assert result.organization == "empty-org"
-            assert result.total_repositories == 0
-            assert result.total_prs == 0
-            assert len(result.unmergeable_prs) == 0
+        assert result.organization == "empty-org"
+        assert result.total_repositories == 0
+        assert result.total_prs == 0
+        assert len(result.unmergeable_prs) == 0
 
         await service.close()
 
@@ -320,7 +318,7 @@ class TestAsyncIntegration:
 
         # Test that service handles errors gracefully during org scan
         with patch.object(
-            service, "_count_org_repositories", side_effect=Exception("Network error")
+            service, "_iter_org_repositories", side_effect=Exception("Network error")
         ):
             # The service doesn't catch this exception at the scan_organization level
             # so we need to catch it ourselves to test proper error handling

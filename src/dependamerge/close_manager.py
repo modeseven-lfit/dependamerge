@@ -70,6 +70,10 @@ class AsyncCloseManager:
         self._github_client: GitHubAsync | None = None
         self._console = Console()
 
+    def __repr__(self) -> str:
+        """Safe repr that never exposes the token value."""
+        return "AsyncCloseManager(token=***)"
+
     async def __aenter__(self):
         """Async context manager entry."""
         self._github_client = GitHubAsync(token=self.token)

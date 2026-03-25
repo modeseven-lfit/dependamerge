@@ -71,6 +71,40 @@ class ParsedUrl:
         return self.source == ChangeSource.GERRIT
 
 
+def _host_matches(
+    hostname: str,
+    target: str,
+    *,
+    allow_subdomains: bool = True,
+) -> bool:
+    """Check if hostname matches target using secure comparison.
+
+    Uses exact equality or subdomain matching with a leading dot
+    to prevent substring bypass attacks.
+
+    SECURITY: This function is the approved way to check hostnames
+    in this codebase. Do NOT use Python's ``in`` operator on hostname
+    strings — see CodeQL rule py/incomplete-url-substring-sanitization.
+
+    Args:
+        hostname: The parsed hostname to check (lowercase).
+        target: The target hostname to match against.
+        allow_subdomains: If True, also matches \\*.target.
+
+    Returns:
+        True if hostname matches target or is a subdomain of target.
+    """
+    if not hostname or not target:
+        return False
+    hostname = hostname.lower()
+    target = target.lower()
+    if hostname == target:
+        return True
+    if allow_subdomains and hostname.endswith(f".{target}"):
+        return True
+    return False
+
+
 def parse_change_url(url: str) -> ParsedUrl:
     """
     Parse a GitHub PR URL or Gerrit change URL.
@@ -97,10 +131,10 @@ def parse_change_url(url: str) -> ParsedUrl:
     except Exception as exc:
         raise UrlParseError(f"Invalid URL format: {exc}") from exc
 
-    if not parsed.netloc:
+    if not parsed.hostname:
         raise UrlParseError("URL must include a hostname")
 
-    host = parsed.netloc.lower()
+    host = parsed.hostname.lower()
     path = parsed.path.rstrip("/")
 
     # Detect platform based on URL characteristics
@@ -117,18 +151,21 @@ def parse_change_url(url: str) -> ParsedUrl:
 
 
 def _is_github_url(host: str, path: str) -> bool:
-    """
-    Check if the URL appears to be a GitHub URL.
+    """Check if the URL is a GitHub URL using secure host comparison.
+
+    SECURITY: Uses exact hostname matching via _host_matches(), not
+    substring checks, to prevent bypass attacks via crafted hostnames.
+    See CodeQL rule py/incomplete-url-substring-sanitization.
 
     Detection heuristics:
-    - Host contains 'github.com' or 'github'
-    - Path contains '/pull/'
+    - Host matches 'github.com' (exact or subdomain)
+    - Path contains '/pull/' (for GitHub Enterprise with unknown hosts)
     """
-    # Check for GitHub domain patterns
-    if "github.com" in host or "github" in host:
+    # SECURITY: Use _host_matches() — never use `"github.com" in host`
+    if _host_matches(host, "github.com"):
         return True
 
-    # Check for PR path pattern (most reliable indicator)
+    # Path-based detection for GitHub Enterprise with unknown hosts
     if "/pull/" in path:
         return True
 
@@ -136,23 +173,23 @@ def _is_github_url(host: str, path: str) -> bool:
 
 
 def _is_gerrit_url(host: str, path: str) -> bool:
-    """
-    Check if the URL appears to be a Gerrit URL.
+    """Check if the URL is a Gerrit URL using structural validation.
+
+    SECURITY: Uses Gerrit's distinctive URL path structure rather than
+    hostname substring matching. See CodeQL rule
+    py/incomplete-url-substring-sanitization.
 
     Detection heuristics:
     - Path contains '/c/' and '/+/' (Gerrit change URL pattern)
-    - Host contains 'gerrit'
+    - Path starts with '/changes/' (Gerrit REST API pattern)
     """
-    # Gerrit change URL pattern: /c/project/+/number
+    # Primary: Gerrit change URL structure is definitive
     if "/c/" in path and "/+/" in path:
         return True
 
-    # Check for Gerrit domain pattern
-    if "gerrit" in host:
-        # Could be a Gerrit dashboard or other page
-        # Only return True if we also have a recognizable path pattern
-        if "/c/" in path or path.startswith("/changes/"):
-            return True
+    # Secondary: Gerrit REST API pattern
+    if path.startswith("/changes/"):
+        return True
 
     return False
 
@@ -262,7 +299,7 @@ def detect_source(url: str) -> ChangeSource:
     except Exception as exc:
         raise UrlParseError(f"Invalid URL format: {exc}") from exc
 
-    host = parsed.netloc.lower()
+    host = parsed.hostname.lower() if parsed.hostname else ""
     path = parsed.path.rstrip("/")
 
     if _is_github_url(host, path):
@@ -277,6 +314,7 @@ __all__ = [
     "ChangeSource",
     "ParsedUrl",
     "UrlParseError",
+    "_host_matches",
     "detect_source",
     "parse_change_url",
 ]

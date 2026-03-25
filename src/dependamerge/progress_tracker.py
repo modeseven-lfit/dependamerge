@@ -399,8 +399,12 @@ class MergeProgressTracker(ProgressTracker):
             text.append(f"{progress_pct:.0f}%", style="bold green")
             text.append(")", style="dim")
         else:
-            operation_icon = "🚪" if self.is_close_operation else "🔀"
-            operation_text = "Closing PRs" if self.is_close_operation else "Merging PRs"
+            operation_icon = "🚪" if self.is_close_operation else "🔍"
+            operation_text = (
+                "Closing PRs"
+                if self.is_close_operation
+                else "Searching for similar PRs"
+            )
             text.append(f"{operation_icon} {operation_text} in ", style="bold blue")
             text.append(f"{self.organization} ", style="bold cyan")
 

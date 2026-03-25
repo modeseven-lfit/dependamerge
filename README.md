@@ -1133,6 +1133,39 @@ The URL must contain `/c/` and `/+/` for the tool to recognize it as a Gerrit ch
 
 ## Security Considerations
 
+### Credential Protection
+
+Dependamerge handles authentication tokens (GitHub PATs, Gerrit HTTP
+credentials) and applies the following layers of protection to prevent
+accidental exposure:
+
+- **Token Redaction** — All git operations redact tokens from logs and
+  error messages. The `git_ops` module recognises GitHub classic tokens
+  (`ghp_`), fine-grained tokens (`github_pat_`), App installation tokens
+  (`ghs_`), user-to-server tokens (`ghu_`), GitLab tokens (`glpat-`),
+  basic-auth URLs, and `x-access-token` URLs
+- **Safe Object Representation** — All classes that store credentials
+  (`GitHubClient`, `GitHubAsync`, `AsyncMergeManager`, `AsyncCloseManager`,
+  `GerritRestClient`, `GerritCredentials`, `NetrcCredentials`) define
+  `__repr__` methods that mask sensitive values
+- **Log Hygiene** — Credential values (tokens, passwords, or usernames)
+  never appear in log output at any level. Debug logs record credential
+  *sources* (e.g., "environment variables", ".netrc") but never the
+  credential values themselves
+- **Scoped Debug Logging** — The `--verbose` flag enables DEBUG level
+  logging for the `dependamerge.*` namespace; third-party libraries
+  (including `httpx`, which logs request headers at TRACE level) remain
+  at WARNING
+- **Exception Sanitisation** — Git command errors redact token patterns
+  from all stored attributes (`args_vec`, `stdout`, `stderr`)
+
+### URL Validation
+
+URL hostname checks use `urlparse()`-based exact matching via the
+`_host_matches()` function, not substring checks. This prevents bypass
+attacks where a crafted hostname (e.g., `evil-github.com.attacker.net`)
+could fool a naïve substring check into trusting a malicious host.
+
 ### GitHub
 
 - Store GitHub tokens securely (environment variables, not in code)
@@ -1140,8 +1173,8 @@ The URL must contain `/c/` and `/+/` for the tool to recognize it as a Gerrit ch
 - Rotate access tokens periodically
 - Review PR changes in interactive preview mode first
 - Be cautious with low similarity thresholds
-- Consider using repository-specific tokens instead of organization-wide access
-  when possible
+- Consider using repository-specific tokens instead of organisation-wide
+  access when possible
 - Audit token permissions and revoke unused tokens periodically
 
 ### Gerrit
