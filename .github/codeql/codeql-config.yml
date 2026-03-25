@@ -1,0 +1,25 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+name: "dependamerge CodeQL config"
+
+# Exclude test files from CodeQL analysis.
+#
+# The "Incomplete URL substring sanitization" alerts
+# (#35, #36, #37) are triggered by test assertions that
+# check error messages contain "githubstatus.com". These
+# are pytest assertions, not security-sensitive URL
+# validation gates.
+#
+# Rather than disabling the rule globally (which would
+# mask any future substring-based URL checks introduced
+# in production code), we exclude only the test directory
+# from analysis. The production code already uses secure
+# hostname comparison via _host_matches() with urlparse.
+#
+# yamllint disable-line rule:line-length
+# See: https://codeql.github.com/codeql-query-help/python/py-incomplete-url-substring-sanitization/
+
+paths-ignore:
+  - tests
