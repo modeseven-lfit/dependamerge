@@ -59,10 +59,10 @@ PathLike = str | Path
 # GitLab tokens, and JWT-like tokens. Keep this list up to date when new
 # token prefixes are introduced. See git_ops module docstring for design goals.
 _TOKEN_PATTERNS = [
-    re.compile(r"ghp_[A-Za-z0-9]{20,}", re.IGNORECASE),      # GitHub PAT (classic)
-    re.compile(r"ghs_[A-Za-z0-9]{20,}", re.IGNORECASE),      # GitHub App installation
-    re.compile(r"ghu_[A-Za-z0-9]{20,}", re.IGNORECASE),      # GitHub user-to-server
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}", re.IGNORECASE),  # GitHub fine-grained
+    re.compile(r"ghp_[A-Za-z0-9]{20,}", re.IGNORECASE),  # GitHub PAT (classic)
+    re.compile(r"ghs_[A-Za-z0-9]{20,}", re.IGNORECASE),  # GitHub App installation
+    re.compile(r"ghu_[A-Za-z0-9]{20,}", re.IGNORECASE),  # GitHub user-to-server
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}", re.IGNORECASE),  # fine-grained
     re.compile(r"glpat-[A-Za-z0-9_-]{20,}", re.IGNORECASE),  # GitLab PAT
     # JWT-like long tokens (best-effort)
     re.compile(r"[A-Za-z0-9-_]{20,}\.[A-Za-z0-9-_]{20,}\.[A-Za-z0-9-_]{10,}"),

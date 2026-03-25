@@ -225,6 +225,8 @@ class GitHubService:
         async for repo in self._iter_org_repositories_with_open_prs(org):
             tasks.append(asyncio.create_task(process_repo(repo)))
 
+        total_repositories = len(tasks)
+
         if tasks:
             results = await asyncio.gather(*tasks)
             for repo_unmergeables, repo_prs_count, scanned_inc, repo_errors in results:
@@ -1044,6 +1046,8 @@ class GitHubService:
         tasks: list[asyncio.Task[Any]] = []
         async for repo in self._iter_org_repositories(org):
             tasks.append(asyncio.create_task(process_repo_status(repo)))
+
+        total_repositories = len(tasks)
 
         if tasks:
             results = await asyncio.gather(*tasks)

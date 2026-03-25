@@ -44,15 +44,19 @@ class GitHubClient:
         if not _host_matches(host, "github.com"):
             raise ValueError(f"Invalid GitHub PR URL: {url}")
 
-        parts = url.rstrip("/").split("/")
+        # Use parsed.path to ignore query strings and fragments
+        # when splitting.
+        parts = parsed.path.strip("/").split("/")
         if "pull" not in parts:
             raise ValueError(f"Invalid GitHub PR URL: {url}")
 
-        # Find the 'pull' segment and get the PR number from the next segment
+        # Find the 'pull' segment and get the PR number
         try:
             pull_index = parts.index("pull")
             if pull_index + 1 >= len(parts):
-                raise ValueError("PR number not found after 'pull'")
+                raise ValueError(
+                    "PR number not found after 'pull'"
+                )
 
             owner = parts[pull_index - 2]
             repo = parts[pull_index - 1]
