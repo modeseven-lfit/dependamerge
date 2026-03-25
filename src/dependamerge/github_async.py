@@ -258,6 +258,10 @@ class GitHubAsync:
             mounts=mounts,
         )
 
+    def __repr__(self) -> str:
+        """Safe repr that never exposes the token value."""
+        return f"GitHubAsync(api_url={self.api_url!r}, token=***)"
+
     async def __aenter__(self) -> GitHubAsync:
         return self
 

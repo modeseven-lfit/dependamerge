@@ -116,7 +116,7 @@ class TestNetrcCredentials:
         assert "supersecret" not in repr_str
         assert "****" in repr_str
         assert "testuser" in repr_str
-        assert "gerrit.example.org" in repr_str
+        assert repr_str.count("gerrit.example.org") == 1
 
 
 class TestNetrcParserBasic:
@@ -195,9 +195,7 @@ class TestNetrcParserBasic:
         """
         parser = NetrcParser(content)
         machines = parser.machines
-        assert "server1.org" in machines
-        assert "server2.org" in machines
-        assert len(machines) == 2
+        assert set(machines) == {"server1.org", "server2.org"}
 
     def test_has_default_property(self) -> None:
         """Test has_default property."""

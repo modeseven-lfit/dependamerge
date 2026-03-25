@@ -662,10 +662,12 @@ def get_credentials_for_host(
 
     credentials = netrc.get_credentials(normalized_host)
     if credentials:
+        # SECURITY: Do not log credential values (usernames, passwords).
+        # Log the credential source and host, not the credentials themselves.
+        # See CodeQL rule py/clear-text-logging-sensitive-data.
         log.debug(
-            "Found netrc credentials for %s (login: %s) in %s",
+            "Found netrc credentials for host %s in %s",
             normalized_host,
-            credentials.login,
             netrc_path,
         )
     else:
@@ -743,11 +745,11 @@ def resolve_gerrit_credentials(
 
                 netrc_creds = netrc.get_credentials(normalized_host)
                 if netrc_creds:
+                    # SECURITY: Do not log credential values.
+                    # See CodeQL rule py/clear-text-logging-sensitive-data.
                     log.debug(
-                        "Using credentials from .netrc for %s (login: %s) in %s",
+                        "Using credentials from .netrc for host %s",
                         normalized_host,
-                        netrc_creds.login,
-                        netrc_path,
                     )
                     return GerritCredentials(
                         username=netrc_creds.login,
@@ -767,11 +769,10 @@ def resolve_gerrit_credentials(
     env_pass = os.getenv(env_password_var, "").strip()
 
     if env_user and env_pass:
-        log.debug(
-            "Using credentials from environment variables %s/%s",
-            env_username_var,
-            env_password_var,
-        )
+        # SECURITY: Break CodeQL taint path — log a fixed string
+        # describing the credential source, not parameter values.
+        # See CodeQL rule py/clear-text-logging-sensitive-data.
+        log.debug("Resolved Gerrit credentials from environment variables")
         return GerritCredentials(
             username=env_user,
             password=env_pass,
@@ -785,10 +786,10 @@ def resolve_gerrit_credentials(
         fallback_pass = os.getenv(fallback_env_password_var, "").strip()
 
         if fallback_user and fallback_pass:
+            # SECURITY: Break CodeQL taint path — log a fixed string.
+            # See CodeQL rule py/clear-text-logging-sensitive-data.
             log.debug(
-                "Using credentials from fallback environment variables %s/%s",
-                fallback_env_username_var,
-                fallback_env_password_var,
+                "Resolved Gerrit credentials from fallback environment variables"
             )
             return GerritCredentials(
                 username=fallback_user,

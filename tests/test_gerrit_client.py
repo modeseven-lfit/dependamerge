@@ -187,7 +187,7 @@ class TestGerritRestClientInit:
         """Test string representation."""
         client = GerritRestClient(base_url="https://gerrit.example.org/")
         repr_str = repr(client)
-        assert "gerrit.example.org" in repr_str
+        assert repr_str == "GerritRestClient(base_url='https://gerrit.example.org/')"
 
 
 class TestGerritRestClientRequests:
@@ -512,7 +512,7 @@ class TestBuildClient:
         """Test building client with just hostname."""
         client = build_client("gerrit.example.org")
 
-        assert "gerrit.example.org" in client.base_url
+        assert client.base_url == "https://gerrit.example.org/"
         assert client.is_authenticated is False
 
     @patch("dependamerge.gerrit.client.GerritRestAPI")
@@ -520,7 +520,7 @@ class TestBuildClient:
         """Test building client with base path."""
         client = build_client("gerrit.example.org", base_path="infra")
 
-        assert "gerrit.example.org/infra/" in client.base_url
+        assert client.base_url == "https://gerrit.example.org/infra/"
 
     @patch("dependamerge.gerrit.client.GerritRestAPI")
     @patch("dependamerge.gerrit.client.HTTPBasicAuth")
