@@ -416,22 +416,15 @@ def _init_github_merge(ctx: _MergeContext) -> None:
     )
 
     if ctx.show_progress:
+        # Create the tracker but do NOT start it yet — it will be
+        # started in _scan_and_find_similar() when the long-running
+        # org scan begins.  The early phases (PR fetch, permissions
+        # check) are fast and use plain console output instead.
         ctx.progress_tracker = MergeProgressTracker(ctx.owner)
-        ctx.progress_tracker.start()
-        if not ctx.progress_tracker.rich_available:
-            console.print(
-                f"🔍 Examining source pull request in {ctx.owner}..."
-            )
-            console.print(
-                "Progress updates will be shown as simple text..."
-            )
-        ctx.progress_tracker.update_operation(
-            "Getting source PR details..."
-        )
-    else:
-        console.print(
-            f"🔍 Examining source pull request in {ctx.owner}..."
-        )
+
+    console.print(
+        f"🔍 Examining source pull request in {ctx.owner}..."
+    )
 
     ctx.comparator = PRComparator(ctx.similarity_threshold)
 
@@ -442,11 +435,6 @@ def _fetch_and_validate_source_pr(ctx: _MergeContext) -> None:
     Populates *ctx.source_pr*.
     """
     assert ctx.github_client is not None
-
-    if ctx.progress_tracker:
-        ctx.progress_tracker.update_operation(
-            "Getting source PR details..."
-        )
 
     try:
         ctx.source_pr = ctx.github_client.get_pull_request_info(
@@ -491,11 +479,7 @@ def _fetch_and_validate_source_pr(ctx: _MergeContext) -> None:
         ctx.source_pr,
         "",
         ctx.github_client,
-        progress_tracker=ctx.progress_tracker,
     )
-
-    if ctx.progress_tracker:
-        ctx.progress_tracker.stop()
 
 
 def _check_merge_permissions(ctx: _MergeContext) -> None:
@@ -503,7 +487,7 @@ def _check_merge_permissions(ctx: _MergeContext) -> None:
 
     Exits early when required permissions are missing.
     """
-    console.print("\n🔍 Checking token permissions...")
+    console.print("🔍 Checking token permissions...")
 
     async def _check() -> dict[str, dict[str, Any]]:
         async with GitHubAsync(token=ctx.token) as client:
@@ -539,13 +523,13 @@ def _check_merge_permissions(ctx: _MergeContext) -> None:
                 "\n💡 Update your token permissions and try again."
             )
             raise typer.Exit(code=3)
-        console.print("✅ Token has required permissions\n")
+        console.print("✅ Token has required permissions")
     except GitHubPermissionError as e:
         console.print(f"\n❌ Permission check failed: {e}")
         raise typer.Exit(code=3) from e
     except Exception as e:
         console.print(f"⚠️  Could not verify permissions: {e}")
-        console.print("   Continuing anyway...\n")
+        console.print("   Continuing anyway...")
 
 
 def _validate_automation_author(ctx: _MergeContext) -> None:
@@ -613,12 +597,12 @@ def _scan_and_find_similar(ctx: _MergeContext) -> None:
     assert ctx.source_pr is not None
     assert ctx.comparator is not None
 
+    console.print(f"Checking organization: {ctx.owner}")
+
+    # Start the progress tracker now — this is where the
+    # long-running org-wide scan begins.
     if ctx.progress_tracker:
-        ctx.progress_tracker.update_operation(
-            "Scanning repositories..."
-        )
-    else:
-        console.print(f"\nChecking organization: {ctx.owner}")
+        ctx.progress_tracker.start()
 
     # Repository enumeration and counting is handled internally
     # by GitHubService via a single-pass GraphQL query that
@@ -677,15 +661,17 @@ def _scan_and_find_similar(ctx: _MergeContext) -> None:
                 "during analysis"
             )
         console.print()
+    else:
+        console.print(
+            f"\n🔍 Found {len(ctx.all_similar_prs)} "
+            "similar PRs"
+        )
 
     if not ctx.all_similar_prs:
         console.print(
             "❌ No similar PRs found in the organization"
         )
 
-    console.print(
-        f"Found {len(ctx.all_similar_prs)} similar PRs:"
-    )
     for target_pr, comparison in ctx.all_similar_prs:
         console.print(
             f"  • {target_pr.repository_full_name} "
@@ -1273,10 +1259,6 @@ def merge(
         _fetch_and_validate_source_pr(ctx)
         _check_merge_permissions(ctx)
 
-        # Restart progress tracker after permissions check
-        if ctx.show_progress and ctx.progress_tracker:
-            ctx.progress_tracker.start()
-
         # Debug matching info for source PR
         if ctx.debug_matching:
             _print_debug_matching(ctx)
@@ -1617,11 +1599,11 @@ def close(
             if errors_count > 0:
                 console.print(f"⚠️  {errors_count} errors encountered during analysis")
             console.print()
+        else:
+            console.print(f"\n🔍 Found {len(all_similar_prs)} similar PRs")
 
         if not all_similar_prs:
             console.print("❌ No similar PRs found in the organization")
-
-        console.print(f"Found {len(all_similar_prs)} similar PRs:")
 
         for target_pr, comparison in all_similar_prs:
             console.print(f"  • {target_pr.repository_full_name} #{target_pr.number}")
