@@ -220,6 +220,8 @@ ignore_missing_imports = true
 [tool.ruff]
 target-version = "py310"
 line-length = 88
+# Auto-generated version file uses deprecated typing imports for backwards compat
+exclude = ["src/dependamerge/_version.py"]
 
 [tool.ruff.lint]
 select = [

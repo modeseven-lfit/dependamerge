@@ -27,11 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from pygerrit2 import GerritRestAPI
-from pygerrit2 import HTTPBasicAuth
-
-from dependamerge.netrc import get_credentials_for_host, NetrcParseError
+from pygerrit2 import GerritRestAPI, HTTPBasicAuth
 from requests.exceptions import RequestException
+
+from dependamerge.netrc import NetrcParseError, get_credentials_for_host
 
 log = logging.getLogger("dependamerge.gerrit.client")
 

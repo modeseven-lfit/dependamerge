@@ -25,7 +25,6 @@ import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -159,7 +158,7 @@ class NetrcParser:
         """
         self._content = content
         self._entries: dict[str, NetrcCredentials] = {}
-        self._default: Optional[NetrcCredentials] = None
+        self._default: NetrcCredentials | None = None
         self._parse()
 
     def _unescape_quoted_string(self, s: str) -> str:
@@ -287,7 +286,7 @@ class NetrcParser:
 
     def _parse_machine_entry(
         self, tokens: list[str], start_idx: int
-    ) -> tuple[int, Optional[NetrcCredentials]]:
+    ) -> tuple[int, NetrcCredentials | None]:
         """Parse a machine entry starting at start_idx."""
         # Skip any newlines after 'machine' keyword
         i = start_idx + 1
@@ -299,8 +298,8 @@ class NetrcParser:
 
         machine = tokens[i]
         i += 1
-        login: Optional[str] = None
-        password: Optional[str] = None
+        login: str | None = None
+        password: str | None = None
 
         while i < len(tokens):
             token = tokens[i]
@@ -372,11 +371,11 @@ class NetrcParser:
 
     def _parse_default_entry(
         self, tokens: list[str], start_idx: int
-    ) -> tuple[int, Optional[NetrcCredentials]]:
+    ) -> tuple[int, NetrcCredentials | None]:
         """Parse a default entry starting at start_idx."""
         i = start_idx + 1
-        login: Optional[str] = None
-        password: Optional[str] = None
+        login: str | None = None
+        password: str | None = None
 
         while i < len(tokens):
             token = tokens[i]
@@ -449,7 +448,7 @@ class NetrcParser:
             else:
                 i += 1
 
-    def get_credentials(self, machine: str) -> Optional[NetrcCredentials]:
+    def get_credentials(self, machine: str) -> NetrcCredentials | None:
         """
         Get credentials for a specific machine.
 
@@ -483,8 +482,8 @@ class NetrcParser:
 
 def find_netrc_file(
     search_local: bool = True,
-    explicit_path: Optional[Path] = None,
-) -> Optional[Path]:
+    explicit_path: Path | None = None,
+) -> Path | None:
     """
     Find a .netrc file using standard search order.
 
@@ -566,9 +565,9 @@ def check_netrc_permissions(path: Path) -> bool:
 
 
 def load_netrc(
-    path: Optional[Path] = None,
+    path: Path | None = None,
     search_local: bool = True,
-) -> Optional[NetrcParser]:
+) -> NetrcParser | None:
     """
     Load and parse a netrc file.
 
@@ -607,11 +606,11 @@ def load_netrc(
 
 def get_credentials_for_host(
     host: str,
-    netrc_file: Optional[Path] = None,
+    netrc_file: Path | None = None,
     search_local: bool = True,
     use_netrc: bool = True,
     netrc_optional: bool = True,
-) -> Optional[NetrcCredentials]:
+) -> NetrcCredentials | None:
     """
     Get credentials for a Gerrit host from .netrc file.
 
@@ -683,15 +682,15 @@ def get_credentials_for_host(
 def resolve_gerrit_credentials(
     host: str,
     *,
-    explicit_username: Optional[str] = None,
-    explicit_password: Optional[str] = None,
+    explicit_username: str | None = None,
+    explicit_password: str | None = None,
     use_netrc: bool = True,
-    netrc_file: Optional[Path] = None,
+    netrc_file: Path | None = None,
     env_username_var: str = "GERRIT_USERNAME",
     env_password_var: str = "GERRIT_PASSWORD",
-    fallback_env_username_var: Optional[str] = "GERRIT_HTTP_USER",
-    fallback_env_password_var: Optional[str] = "GERRIT_HTTP_PASSWORD",
-) -> Optional[GerritCredentials]:
+    fallback_env_username_var: str | None = "GERRIT_HTTP_USER",
+    fallback_env_password_var: str | None = "GERRIT_HTTP_PASSWORD",
+) -> GerritCredentials | None:
     """
     Resolve Gerrit credentials from multiple sources with defined priority.
 

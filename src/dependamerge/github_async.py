@@ -8,11 +8,11 @@ import json
 import logging
 import os
 import time
-from urllib.parse import quote
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import (
     Any,
 )
+from urllib.parse import quote
 
 import httpx
 from aiolimiter import AsyncLimiter
