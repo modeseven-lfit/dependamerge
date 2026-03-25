@@ -6,7 +6,9 @@ import hashlib
 import logging
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import requests
 import typer
@@ -38,7 +40,6 @@ from .gerrit import (
     create_gerrit_service,
     create_submit_manager,
 )
-
 from .git_ops import GitError
 from .github_async import (
     GitHubAsync,
@@ -51,14 +52,14 @@ from .github_async import (
 )
 from .github_client import GitHubClient
 from .github_service import AUTOMATION_TOOLS
-from .merge_manager import AsyncMergeManager
+from .merge_manager import AsyncMergeManager, MergeResult
 from .models import ComparisonResult, PullRequestInfo
-from .pr_comparator import PRComparator
-from .progress_tracker import MergeProgressTracker, ProgressTracker
 from .netrc import (
     NetrcParseError,
     resolve_gerrit_credentials,
 )
+from .pr_comparator import PRComparator
+from .progress_tracker import MergeProgressTracker, ProgressTracker
 from .resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
 from .system_utils import get_default_workers
 from .url_parser import ParsedUrl, UrlParseError, parse_change_url
@@ -294,6 +295,635 @@ def _format_gerrit_similarity(comparison: GerritComparisonResult) -> str:
     return f"{author_text}{total_score}{breakdown}"
 
 
+# ---------------------------------------------------------------------------
+# Merge context & helper subroutines
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _MergeContext:
+    """Shared state threaded through the merge sub-routines."""
+
+    # CLI parameters
+    pr_url: str
+    no_confirm: bool
+    similarity_threshold: float
+    merge_method: str
+    token: str | None
+    override: str | None
+    no_fix: bool
+    show_progress: bool
+    debug_matching: bool
+    dismiss_copilot: bool
+    force: str
+    verbose: bool
+    no_netrc: bool
+    netrc_file: Path | None
+    netrc_optional: bool
+    github2gerrit_mode: str
+
+    # Derived / mutable state
+    github_client: GitHubClient | None = None
+    owner: str = ""
+    repo_name: str = ""
+    pr_number: int = 0
+    comparator: PRComparator | None = None
+    source_pr: PullRequestInfo | None = None
+    progress_tracker: MergeProgressTracker | None = None
+    all_similar_prs: list[
+        tuple[PullRequestInfo, ComparisonResult]
+    ] = field(default_factory=list)
+
+
+def _validate_merge_inputs(
+    submit_gerrit_changes: bool,
+    skip_gerrit_changes: bool,
+    ignore_github2gerrit: bool,
+    force: str,
+    verbose: bool,
+) -> str:
+    """Validate CLI flags and configure logging.
+
+    Returns the effective github2gerrit_mode string.
+
+    Raises:
+        typer.Exit: On mutually exclusive flags or invalid force level.
+    """
+    g2g_flags_set = sum(
+        [submit_gerrit_changes, skip_gerrit_changes, ignore_github2gerrit]
+    )
+    if g2g_flags_set > 1:
+        console.print(
+            "❌ Error: --submit-gerrit-changes, --skip-gerrit-changes, and "
+            "--ignore-github2gerrit are mutually exclusive."
+        )
+        raise typer.Exit(1)
+
+    if skip_gerrit_changes:
+        github2gerrit_mode = "skip"
+    elif ignore_github2gerrit:
+        github2gerrit_mode = "ignore"
+    else:
+        github2gerrit_mode = "submit"
+
+    # Configure logging
+    if verbose:
+        logging.basicConfig(
+            level=logging.WARNING,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
+        logging.getLogger("dependamerge").setLevel(logging.DEBUG)
+    else:
+        logging.basicConfig(
+            level=logging.WARNING,
+            format="%(levelname)s - %(message)s",
+        )
+
+    valid_force_levels = [
+        "none",
+        "code-owners",
+        "protection-rules",
+        "all",
+    ]
+    if force not in valid_force_levels:
+        console.print(
+            f"Error: Invalid --force level '{force}'. "
+            f"Must be one of: {', '.join(valid_force_levels)}"
+        )
+        raise typer.Exit(1)
+
+    if force == "all":
+        console.print(
+            "⚠️  Warning: Using --force=all will bypass most safety checks."
+        )
+        console.print(
+            "   This may attempt merges that will fail at GitHub API level."
+        )
+
+    return github2gerrit_mode
+
+
+def _init_github_merge(ctx: _MergeContext) -> None:
+    """Initialise the GitHub client, progress tracker, and comparator.
+
+    Populates *ctx* in-place with the resolved objects.
+    """
+    ctx.github_client = GitHubClient(ctx.token)
+    assert ctx.github_client.token is not None
+    ctx.token = ctx.github_client.token
+    ctx.owner, ctx.repo_name, ctx.pr_number = (
+        ctx.github_client.parse_pr_url(ctx.pr_url)
+    )
+
+    if ctx.show_progress:
+        ctx.progress_tracker = MergeProgressTracker(ctx.owner)
+        ctx.progress_tracker.start()
+        if not ctx.progress_tracker.rich_available:
+            console.print(
+                f"🔍 Examining source pull request in {ctx.owner}..."
+            )
+            console.print(
+                "Progress updates will be shown as simple text..."
+            )
+        ctx.progress_tracker.update_operation(
+            "Getting source PR details..."
+        )
+    else:
+        console.print(
+            f"🔍 Examining source pull request in {ctx.owner}..."
+        )
+
+    ctx.comparator = PRComparator(ctx.similarity_threshold)
+
+
+def _fetch_and_validate_source_pr(ctx: _MergeContext) -> None:
+    """Fetch the source PR and validate that it is open.
+
+    Populates *ctx.source_pr*.
+    """
+    assert ctx.github_client is not None
+
+    if ctx.progress_tracker:
+        ctx.progress_tracker.update_operation(
+            "Getting source PR details..."
+        )
+
+    try:
+        ctx.source_pr = ctx.github_client.get_pull_request_info(
+            ctx.owner, ctx.repo_name, ctx.pr_number
+        )
+        if ctx.source_pr.state != "open":
+            if ctx.progress_tracker:
+                ctx.progress_tracker.stop()
+            exit_for_pr_state_error(
+                ctx.pr_number,
+                "closed",
+                details="Pull request has been closed",
+            )
+    except (
+        urllib3.exceptions.NameResolutionError,
+        urllib3.exceptions.MaxRetryError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.RequestException,
+    ) as e:
+        if is_network_error(e):
+            exit_with_error(
+                ExitCode.NETWORK_ERROR,
+                details="Failed to fetch PR details from GitHub API",
+                exception=e,
+            )
+        elif is_github_api_permission_error(e):
+            exit_for_github_api_error(
+                details="Failed to fetch PR details", exception=e
+            )
+        else:
+            exit_with_error(
+                ExitCode.GENERAL_ERROR,
+                message="❌ Failed to fetch PR details",
+                details=str(e),
+                exception=e,
+            )
+
+    _display_pr_info(
+        ctx.source_pr,
+        "",
+        ctx.github_client,
+        progress_tracker=ctx.progress_tracker,
+    )
+
+    if ctx.progress_tracker:
+        ctx.progress_tracker.stop()
+
+
+def _check_merge_permissions(ctx: _MergeContext) -> None:
+    """Pre-flight token permission check.
+
+    Exits early when required permissions are missing.
+    """
+    console.print("\n🔍 Checking token permissions...")
+
+    async def _check() -> dict[str, dict[str, Any]]:
+        async with GitHubAsync(token=ctx.token) as client:
+            operations = ["approve", "merge"]
+            if not ctx.no_fix:
+                operations.append("update_branch")
+            return await client.check_token_permissions(
+                operations, ctx.owner, ctx.repo_name
+            )
+
+    try:
+        perm_results = asyncio.run(_check())
+        missing_perms = [
+            op
+            for op, result in perm_results.items()
+            if not result["has_permission"]
+        ]
+        if missing_perms:
+            console.print("\n❌ Token Permission Check Failed:\n")
+            for op in missing_perms:
+                result = perm_results[op]
+                console.print(f"   • {op}: {result['error']}")
+                if result.get("guidance"):
+                    console.print(
+                        f"     Classic: "
+                        f"{result['guidance'].get('classic', 'N/A')}"
+                    )
+                    console.print(
+                        f"     Fine-grained: "
+                        f"{result['guidance'].get('fine_grained', 'N/A')}"
+                    )
+            console.print(
+                "\n💡 Update your token permissions and try again."
+            )
+            raise typer.Exit(code=3)
+        console.print("✅ Token has required permissions\n")
+    except GitHubPermissionError as e:
+        console.print(f"\n❌ Permission check failed: {e}")
+        raise typer.Exit(code=3) from e
+    except Exception as e:
+        console.print(f"⚠️  Could not verify permissions: {e}")
+        console.print("   Continuing anyway...\n")
+
+
+def _validate_automation_author(ctx: _MergeContext) -> None:
+    """Verify the source PR author is from automation or has a valid override.
+
+    May print usage guidance and return early (via ``return`` in
+    the caller) or exit on validation failure.
+
+    Raises:
+        typer.Exit: On invalid override SHA.
+    """
+    assert ctx.github_client is not None
+    assert ctx.source_pr is not None
+
+    if ctx.github_client.is_automation_author(ctx.source_pr.author):
+        return
+
+    commit_messages = ctx.github_client.get_pull_request_commits(
+        ctx.owner, ctx.repo_name, ctx.pr_number
+    )
+    first_commit_line = (
+        commit_messages[0].split("\n")[0] if commit_messages else ""
+    )
+    expected_sha = _generate_override_sha(
+        ctx.source_pr, first_commit_line
+    )
+
+    if not ctx.override:
+        console.print(
+            "Source PR is not from a recognized automation tool."
+        )
+        console.print(
+            f"To merge this and similar PRs, run again with: "
+            f"--override {expected_sha}"
+        )
+        console.print(
+            f"This SHA is based on the author "
+            f"'{ctx.source_pr.author}' and commit message "
+            f"'{first_commit_line[:50]}...'",
+            style="dim",
+        )
+        raise typer.Exit(0)
+
+    if not _validate_override_sha(
+        ctx.override, ctx.source_pr, first_commit_line
+    ):
+        exit_with_error(
+            ExitCode.VALIDATION_ERROR,
+            message="❌ Invalid override SHA provided",
+            details=(
+                "Expected SHA for this PR and author: "
+                f"--override {expected_sha}"
+            ),
+        )
+
+    console.print(
+        "Override SHA validated. "
+        "Proceeding with non-automation PR merge."
+    )
+
+
+def _scan_and_find_similar(ctx: _MergeContext) -> None:
+    """Scan org repositories and populate *ctx.all_similar_prs*."""
+    assert ctx.github_client is not None
+    assert ctx.source_pr is not None
+    assert ctx.comparator is not None
+
+    if ctx.progress_tracker:
+        ctx.progress_tracker.update_operation(
+            "Getting organization repositories..."
+        )
+    else:
+        console.print(f"\nChecking organization: {ctx.owner}")
+
+    try:
+        ctx.github_client.get_organization_repositories(ctx.owner)
+    except (
+        urllib3.exceptions.NameResolutionError,
+        urllib3.exceptions.MaxRetryError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.RequestException,
+    ) as e:
+        if is_network_error(e):
+            exit_with_error(
+                ExitCode.NETWORK_ERROR,
+                details=(
+                    "Failed to fetch organization repositories "
+                    "from GitHub API"
+                ),
+                exception=e,
+            )
+        elif is_github_api_permission_error(e):
+            exit_for_github_api_error(
+                details="Failed to fetch organization repositories",
+                exception=e,
+            )
+        else:
+            exit_with_error(
+                ExitCode.GENERAL_ERROR,
+                message=(
+                    "❌ Failed to fetch organization repositories"
+                ),
+                details=str(e),
+                exception=e,
+            )
+
+    if ctx.progress_tracker:
+        ctx.progress_tracker.update_operation(
+            "Listing repositories..."
+        )
+
+    repositories = ctx.github_client.get_organization_repositories(
+        ctx.owner
+    )
+    total_repos = len(repositories)
+    console.print(f"Found {total_repos} repositories")
+
+    if ctx.progress_tracker:
+        ctx.progress_tracker.update_total_repositories(total_repos)
+    else:
+        console.print(f"Found {total_repos} repositories")
+
+    if ctx.progress_tracker:
+        ctx.progress_tracker.update_operation(
+            "Listing repositories..."
+        )
+
+    from .github_service import GitHubService
+
+    async def _find_similar():
+        svc = GitHubService(
+            token=ctx.token,
+            progress_tracker=ctx.progress_tracker,
+            debug_matching=ctx.debug_matching,
+        )
+        try:
+            assert ctx.github_client is not None
+            assert ctx.source_pr is not None
+            assert ctx.comparator is not None
+            only_automation = ctx.github_client.is_automation_author(
+                ctx.source_pr.author
+            )
+            return await svc.find_similar_prs(
+                ctx.owner,
+                ctx.source_pr,
+                ctx.comparator,
+                only_automation=only_automation,
+            )
+        finally:
+            await svc.close()
+
+    ctx.all_similar_prs = asyncio.run(_find_similar())
+
+    if ctx.progress_tracker:
+        ctx.progress_tracker.stop()
+        summary = ctx.progress_tracker.get_summary()
+        elapsed_time = summary.get("elapsed_time")
+        total_prs_analyzed = summary.get("total_prs_analyzed")
+        completed_repositories = summary.get(
+            "completed_repositories"
+        )
+        similar_prs_found = summary.get("similar_prs_found")
+        errors_count = summary.get("errors_count", 0)
+        console.print(
+            f"\n✅ Analysis completed in {elapsed_time}"
+        )
+        console.print(
+            f"📊 Analyzed {total_prs_analyzed} PRs across "
+            f"{completed_repositories} repositories"
+        )
+        console.print(
+            f"🔍 Found {similar_prs_found} similar PRs"
+        )
+        if errors_count > 0:
+            console.print(
+                f"⚠️  {errors_count} errors encountered "
+                "during analysis"
+            )
+        console.print()
+
+    if not ctx.all_similar_prs:
+        console.print(
+            "❌ No similar PRs found in the organization"
+        )
+
+    console.print(
+        f"Found {len(ctx.all_similar_prs)} similar PRs:"
+    )
+    for target_pr, comparison in ctx.all_similar_prs:
+        console.print(
+            f"  • {target_pr.repository_full_name} "
+            f"#{target_pr.number}"
+        )
+        console.print(
+            f"    {_format_condensed_similarity(comparison)}"
+        )
+
+
+def _run_parallel_merge(
+    ctx: _MergeContext,
+    prs_to_merge: list[
+        tuple[PullRequestInfo, ComparisonResult | None]
+    ],
+    preview: bool,
+) -> list[MergeResult]:
+    """Execute a parallel merge (preview or real) and return results."""
+
+    async def _do_merge():
+        async with AsyncMergeManager(
+            token=ctx.token,  # pyright: ignore[reportArgumentType]
+            merge_method=ctx.merge_method,
+            max_retries=MAX_RETRIES,
+            concurrency=10,
+            fix_out_of_date=not ctx.no_fix,
+            progress_tracker=ctx.progress_tracker,
+            preview_mode=preview,
+            dismiss_copilot=ctx.dismiss_copilot,
+            force_level=ctx.force,
+            github2gerrit_mode=ctx.github2gerrit_mode,
+            no_netrc=ctx.no_netrc,
+            netrc_file=ctx.netrc_file,
+        ) as merge_manager:
+            if not preview:
+                console.print(
+                    f"\n🚀 Merging {len(prs_to_merge)} "
+                    "pull requests..."
+                )
+            return await merge_manager.merge_prs_parallel(
+                prs_to_merge
+            )
+
+    return asyncio.run(_do_merge())
+
+
+def _handle_preview_confirmation(
+    ctx: _MergeContext,
+    merge_results: list[MergeResult],
+    all_prs_to_merge: list[
+        tuple[PullRequestInfo, ComparisonResult | None]
+    ],
+    merged_count: int,
+    total_to_merge: int,
+) -> None:
+    """Handle the interactive preview-then-confirm flow.
+
+    Prompts the user for a continuation SHA and, if confirmed,
+    executes the real merge.
+    """
+    assert ctx.github_client is not None
+    assert ctx.source_pr is not None
+
+    console.print(f"\nMergeable {merged_count}/{total_to_merge} PRs")
+
+    if merged_count == 0:
+        console.print("\n💡 No PRs are mergeable at this time.")
+        return
+
+    commit_messages = ctx.github_client.get_pull_request_commits(
+        ctx.owner, ctx.repo_name, ctx.pr_number
+    )
+    first_commit_line = (
+        commit_messages[0].split("\n")[0] if commit_messages else ""
+    )
+    continue_sha_hash = _generate_continue_sha(
+        ctx.source_pr, first_commit_line
+    )
+    console.print()
+    console.print(
+        f"To proceed with merging enter: {continue_sha_hash}"
+    )
+
+    try:
+        if "pytest" in sys.modules or os.getenv("TESTING"):
+            console.print(
+                "⚠️  Test mode detected "
+                "- skipping interactive prompt"
+            )
+            return
+
+        user_input = input(
+            "Enter the string above to continue "
+            "(or press Enter to cancel): "
+        ).strip()
+
+        if user_input == continue_sha_hash:
+            _execute_confirmed_merge(
+                ctx, merge_results, all_prs_to_merge
+            )
+        elif user_input == "":
+            console.print("❌ Merge cancelled by user.")
+        else:
+            console.print("❌ Invalid input. Merge cancelled.")
+    except KeyboardInterrupt:
+        console.print("\n❌ Merge cancelled by user.")
+    except EOFError:
+        console.print("\n❌ Merge cancelled.")
+
+
+def _execute_confirmed_merge(
+    ctx: _MergeContext,
+    preview_results: list[MergeResult],
+    all_prs_to_merge: list[
+        tuple[PullRequestInfo, ComparisonResult | None]
+    ],
+) -> None:
+    """Run the real merge after user confirmation."""
+    mergeable_prs = [
+        all_prs_to_merge[i]
+        for i, result in enumerate(preview_results)
+        if result.status.value == "merged"
+    ]
+    merged_count = len(mergeable_prs)
+    console.print(
+        f"\n🔨 Merging {merged_count} mergeable pull requests..."
+    )
+
+    real_results = _run_parallel_merge(
+        ctx, mergeable_prs, preview=False
+    )
+
+    final_merged = sum(
+        1 for r in real_results if r.status.value == "merged"
+    )
+    final_failed = sum(
+        1 for r in real_results if r.status.value == "failed"
+    )
+    final_skipped = sum(
+        1 for r in real_results if r.status.value == "skipped"
+    )
+    final_blocked = sum(
+        1 for r in real_results if r.status.value == "blocked"
+    )
+    console.print(
+        f"\n🚀 Final Results: {final_merged} merged, "
+        f"{final_failed} failed"
+    )
+    if final_skipped > 0:
+        console.print(f"⏭️  Skipped {final_skipped} PRs")
+    if final_blocked > 0:
+        console.print(f"🛑 Blocked {final_blocked} PRs")
+
+
+def _display_merge_results(
+    merge_results: list[MergeResult],
+    no_confirm: bool,
+) -> None:
+    """Print the final summary of merge results."""
+    merged_count = sum(
+        1 for r in merge_results if r.status.value == "merged"
+    )
+    failed_count = sum(
+        1 for r in merge_results if r.status.value == "failed"
+    )
+    skipped_count = sum(
+        1 for r in merge_results if r.status.value == "skipped"
+    )
+    blocked_count = sum(
+        1 for r in merge_results if r.status.value == "blocked"
+    )
+
+    if failed_count > 0:
+        if not no_confirm:
+            console.print(
+                f"❌ Would fail to merge {failed_count} PRs"
+            )
+        else:
+            console.print(f"❌ Failed {failed_count} PRs")
+    if skipped_count > 0:
+        console.print(f"⏭️  Skipped {skipped_count} PRs")
+    if blocked_count > 0:
+        console.print(f"🛑 Blocked {blocked_count} PRs")
+
+    if no_confirm:
+        console.print(
+            f"📈 Final Results: {merged_count} merged, "
+            f"{failed_count} failed"
+        )
+
+
 def _handle_gerrit_merge(
     parsed_url: ParsedUrl,
     no_confirm: bool,
@@ -471,7 +1101,7 @@ def _handle_gerrit_merge(
         reviewed_count = sum(1 for r in results if r.reviewed and not r.submitted)
         failed_count = sum(1 for r in results if not r.success)
 
-        console.print(f"\n📈 Results:")
+        console.print("\n📈 Results:")
         console.print(f"   ✅ Submitted: {submitted_count}")
         if reviewed_count > 0:
             console.print(f"   📝 Reviewed (not submitted): {reviewed_count}")
@@ -489,16 +1119,16 @@ def _handle_gerrit_merge(
     except GerritAuthError as e:
         console.print(f"❌ Gerrit authentication failed: {e}")
         console.print("   Check your GERRIT_USERNAME and GERRIT_PASSWORD")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     except GerritRestError as e:
         console.print(f"❌ Gerrit API error: {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     except Exception as e:
         console.print(f"❌ Error during Gerrit merge operation: {e}")
         if verbose:
             import traceback
             traceback.print_exc()
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @app.command()
@@ -636,555 +1266,139 @@ def merge(
     .netrc search order: ./netrc, ~/.netrc, ~/_netrc (Windows)
     Use --netrc-file to specify an explicit path.
     """
-    # Validate mutually exclusive GitHub2Gerrit flags
-    g2g_flags_set = sum([submit_gerrit_changes, skip_gerrit_changes, ignore_github2gerrit])
-    if g2g_flags_set > 1:
-        console.print(
-            "❌ Error: --submit-gerrit-changes, --skip-gerrit-changes, and "
-            "--ignore-github2gerrit are mutually exclusive."
+    # --- Input validation & logging setup ---
+    github2gerrit_mode = _validate_merge_inputs(
+        submit_gerrit_changes,
+        skip_gerrit_changes,
+        ignore_github2gerrit,
+        force,
+        verbose,
+    )
+
+    # --- Parse URL and route to Gerrit if applicable ---
+    try:
+        parsed_url = parse_change_url(pr_url)
+    except UrlParseError as e:
+        console.print(f"❌ Invalid URL: {e}")
+        raise typer.Exit(1) from None
+
+    if parsed_url.is_gerrit:
+        _handle_gerrit_merge(
+            parsed_url=parsed_url,
+            no_confirm=no_confirm,
+            similarity_threshold=similarity_threshold,
+            verbose=verbose,
+            console=console,
+            no_netrc=no_netrc,
+            netrc_file=netrc_file,
+            netrc_optional=netrc_optional,
         )
-        raise typer.Exit(1)
+        return
 
-    # Determine the effective GitHub2Gerrit mode:
-    # - "submit" (default): detect G2G PRs and submit the Gerrit change
-    # - "skip": detect G2G PRs and skip them
-    # - "ignore": do not check for G2G comments at all
-    if skip_gerrit_changes:
-        github2gerrit_mode = "skip"
-    elif ignore_github2gerrit:
-        github2gerrit_mode = "ignore"
-    else:
-        # Default is "submit" (whether --submit-gerrit-changes was explicit or not)
-        github2gerrit_mode = "submit"
-
-    # Configure logging
-    # Keep the root logger at WARNING (or INFO) so third-party libraries stay
-    # quiet by default.  --verbose only enables DEBUG for the dependamerge
-    # logger hierarchy, avoiding the need for an ever-growing suppression list.
-    if verbose:
-        logging.basicConfig(
-            level=logging.WARNING,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        )
-        logging.getLogger("dependamerge").setLevel(logging.DEBUG)
-    else:
-        logging.basicConfig(
-            level=logging.WARNING,
-            format="%(levelname)s - %(message)s",
-        )
-
-    # Validate force level
-    valid_force_levels = ["none", "code-owners", "protection-rules", "all"]
-    if force not in valid_force_levels:
-        console.print(
-            f"Error: Invalid --force level '{force}'. Must be one of: {', '.join(valid_force_levels)}"
-        )
-        raise typer.Exit(1)
-
-    # Warn user about force levels
-    if force == "all":
-        console.print("⚠️  Warning: Using --force=all will bypass most safety checks.")
-        console.print("   This may attempt merges that will fail at GitHub API level.")
-
-    # Initialize progress tracker
-    progress_tracker = None
+    # --- GitHub merge flow ---
+    ctx = _MergeContext(
+        pr_url=pr_url,
+        no_confirm=no_confirm,
+        similarity_threshold=similarity_threshold,
+        merge_method=merge_method,
+        token=token,
+        override=override,
+        no_fix=no_fix,
+        show_progress=show_progress,
+        debug_matching=debug_matching,
+        dismiss_copilot=dismiss_copilot,
+        force=force,
+        verbose=verbose,
+        no_netrc=no_netrc,
+        netrc_file=netrc_file,
+        netrc_optional=netrc_optional,
+        github2gerrit_mode=github2gerrit_mode,
+    )
 
     try:
-        # Parse URL to detect platform (GitHub or Gerrit)
-        try:
-            parsed_url = parse_change_url(pr_url)
-        except UrlParseError as e:
-            console.print(f"❌ Invalid URL: {e}")
-            raise typer.Exit(1)
+        _init_github_merge(ctx)
+        _fetch_and_validate_source_pr(ctx)
+        _check_merge_permissions(ctx)
 
-        # Route to appropriate handler based on platform
-        if parsed_url.is_gerrit:
-            # Handle Gerrit change
-            _handle_gerrit_merge(
-                parsed_url=parsed_url,
-                no_confirm=no_confirm,
-                similarity_threshold=similarity_threshold,
-                verbose=verbose,
-                console=console,
-                no_netrc=no_netrc,
-                netrc_file=netrc_file,
-                netrc_optional=netrc_optional,
+        # Restart progress tracker after permissions check
+        if ctx.show_progress and ctx.progress_tracker:
+            ctx.progress_tracker.start()
+
+        # Debug matching info for source PR
+        if ctx.debug_matching:
+            _print_debug_matching(ctx)
+
+        # Validate automation author / override
+        _validate_automation_author(ctx)
+
+        # Scan org and find similar PRs
+        _scan_and_find_similar(ctx)
+
+        if not ctx.no_confirm:
+            console.print("\n🔍 Dependamerge Evaluation\n")
+
+        # Build full list and run parallel merge
+        assert ctx.source_pr is not None
+        source_entry: tuple[PullRequestInfo, ComparisonResult | None] = (
+            ctx.source_pr, None
+        )
+        all_prs_to_merge: list[
+            tuple[PullRequestInfo, ComparisonResult | None]
+        ] = [*ctx.all_similar_prs, source_entry]
+        merge_results = _run_parallel_merge(
+            ctx, all_prs_to_merge, preview=not ctx.no_confirm
+        )
+
+        # Process and display results
+        if not merge_results:
+            console.print("❌ No PRs were processed")
+            return
+
+        merged_count = sum(
+            1 for r in merge_results
+            if r.status.value == "merged"
+        )
+
+        if not ctx.no_confirm:
+            _handle_preview_confirmation(
+                ctx,
+                merge_results,
+                all_prs_to_merge,
+                merged_count,
+                len(merge_results),
             )
             return
 
-        # GitHub flow continues below
-        # Parse PR URL to get organization info
-        github_client = GitHubClient(token)
-        # GitHubClient resolves None -> GITHUB_TOKEN env var (raises if missing)
-        assert github_client.token is not None
-        token = github_client.token
-        owner, repo_name, pr_number = github_client.parse_pr_url(pr_url)
-
-        # Initialize progress tracker with organization name
-        if show_progress:
-            progress_tracker = MergeProgressTracker(owner)
-            progress_tracker.start()
-            # Check if Rich display is available
-            if not progress_tracker.rich_available:
-                console.print(f"🔍 Examining source pull request in {owner}...")
-                console.print("Progress updates will be shown as simple text...")
-            progress_tracker.update_operation("Getting source PR details...")
-        else:
-            console.print(f"🔍 Examining source pull request in {owner}...")
-
-        # Initialize comparator
-        comparator = PRComparator(similarity_threshold)
-
-        if progress_tracker:
-            progress_tracker.update_operation("Getting source PR details...")
-
-        try:
-            source_pr: PullRequestInfo = github_client.get_pull_request_info(
-                owner, repo_name, pr_number
-            )
-
-            # Skip closed PRs early
-            if source_pr.state != "open":
-                if progress_tracker:
-                    progress_tracker.stop()
-                exit_for_pr_state_error(
-                    pr_number, "closed", details="Pull request has been closed"
-                )
-        except (
-            urllib3.exceptions.NameResolutionError,
-            urllib3.exceptions.MaxRetryError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-            requests.exceptions.RequestException,
-        ) as e:
-            if is_network_error(e):
-                exit_with_error(
-                    ExitCode.NETWORK_ERROR,
-                    details="Failed to fetch PR details from GitHub API",
-                    exception=e,
-                )
-            elif is_github_api_permission_error(e):
-                exit_for_github_api_error(
-                    details="Failed to fetch PR details", exception=e
-                )
-            else:
-                exit_with_error(
-                    ExitCode.GENERAL_ERROR,
-                    message="❌ Failed to fetch PR details",
-                    details=str(e),
-                    exception=e,
-                )
-
-        # Display source PR info
-        _display_pr_info(
-            source_pr, "", github_client, progress_tracker=progress_tracker
-        )
-
-        # Stop progress tracker before permissions check to avoid Rich display interference
-        if progress_tracker:
-            progress_tracker.stop()
-
-        # Pre-flight permission check (for all modes, to fail fast before expensive org scan)
-        console.print("\n🔍 Checking token permissions...")
-
-        # Check permissions on the source repository
-        async def _check_permissions():
-            async with GitHubAsync(token=token) as client:
-                operations = ["approve", "merge"]
-                if not no_fix:
-                    operations.append("update_branch")
-                return await client.check_token_permissions(
-                    operations, owner, repo_name
-                )
-
-        try:
-            perm_results = asyncio.run(_check_permissions())
-
-            # Check if any required permissions are missing
-            missing_perms = [
-                op
-                for op, result in perm_results.items()
-                if not result["has_permission"]
-            ]
-
-            if missing_perms:
-                console.print("\n❌ Token Permission Check Failed:\n")
-                for op in missing_perms:
-                    result = perm_results[op]
-                    console.print(f"   • {op}: {result['error']}")
-                    if result.get("guidance"):
-                        console.print(
-                            f"     Classic: {result['guidance'].get('classic', 'N/A')}"
-                        )
-                        console.print(
-                            f"     Fine-grained: {result['guidance'].get('fine_grained', 'N/A')}"
-                        )
-                console.print("\n💡 Update your token permissions and try again.")
-                raise typer.Exit(code=3)
-
-            console.print("✅ Token has required permissions\n")
-        except GitHubPermissionError as e:
-            console.print(f"\n❌ Permission check failed: {e}")
-            raise typer.Exit(code=3) from e
-        except Exception as e:
-            # Don't fail on permission check errors, just warn
-            console.print(f"⚠️  Could not verify permissions: {e}")
-            console.print("   Continuing anyway...\n")
-
-        # Restart progress tracker after permissions check
-        if show_progress and progress_tracker:
-            progress_tracker.start()
-
-        # Debug matching info for source PR
-        if debug_matching:
-            console.print("\n🔍 Debug Matching Information")
-            console.print(
-                f"   Source PR automation status: {github_client.is_automation_author(source_pr.author)}"
-            )
-            console.print(
-                f"   Extracted package: '{comparator._extract_package_name(source_pr.title)}'"
-            )
-            console.print(f"   Similarity threshold: {similarity_threshold}")
-            if source_pr.body:
-                console.print(f"   Body preview: {source_pr.body[:100]}...")
-                console.print(
-                    f"   Is dependabot body: {comparator._is_dependabot_body(source_pr.body)}"
-                )
-            else:
-                console.print("   ⚠️  Source PR has no body")
-            console.print()
-
-        # Check if source PR is from automation or has valid override
-        if not github_client.is_automation_author(source_pr.author):
-            # Get commit messages to generate SHA
-            commit_messages = github_client.get_pull_request_commits(
-                owner, repo_name, pr_number
-            )
-            first_commit_line = (
-                commit_messages[0].split("\n")[0] if commit_messages else ""
-            )
-
-            # Generate expected SHA for this PR
-            expected_sha = _generate_override_sha(source_pr, first_commit_line)
-
-            if not override:
-                console.print("Source PR is not from a recognized automation tool.")
-                console.print(
-                    f"To merge this and similar PRs, run again with: --override {expected_sha}"
-                )
-                console.print(
-                    f"This SHA is based on the author '{source_pr.author}' and commit message '{first_commit_line[:50]}...'",
-                    style="dim",
-                )
-                return
-
-            # Validate provided override SHA
-            if not _validate_override_sha(override, source_pr, first_commit_line):
-                # Use the already generated expected_sha for error message
-                exit_with_error(
-                    ExitCode.VALIDATION_ERROR,
-                    message="❌ Invalid override SHA provided",
-                    details=f"Expected SHA for this PR and author: --override {expected_sha}",
-                )
-
-            console.print(
-                "Override SHA validated. Proceeding with non-automation PR merge."
-            )
-
-        # Get organization repositories
-        if progress_tracker:
-            progress_tracker.update_operation("Getting organization repositories...")
-        else:
-            console.print(f"\nChecking organization: {owner}")
-
-        try:
-            repositories: list[str] = github_client.get_organization_repositories(owner)
-        except (
-            urllib3.exceptions.NameResolutionError,
-            urllib3.exceptions.MaxRetryError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout,
-            requests.exceptions.RequestException,
-        ) as e:
-            if is_network_error(e):
-                exit_with_error(
-                    ExitCode.NETWORK_ERROR,
-                    details="Failed to fetch organization repositories from GitHub API",
-                    exception=e,
-                )
-            elif is_github_api_permission_error(e):
-                exit_for_github_api_error(
-                    details="Failed to fetch organization repositories", exception=e
-                )
-            else:
-                exit_with_error(
-                    ExitCode.GENERAL_ERROR,
-                    message="❌ Failed to fetch organization repositories",
-                    details=str(e),
-                    exception=e,
-                )
-        console.print(f"Found {len(repositories)} repositories")
-        #     progress.update(task, description=f"Found {len(repositories)} repositories")
-
-        # Find similar PRs
-        # similar_prs: List[Tuple[PullRequestInfo, ComparisonResult]] = []
-
-        if progress_tracker:
-            progress_tracker.update_operation("Listing repositories...")
-
-        repositories = github_client.get_organization_repositories(owner)
-        total_repos = len(repositories)
-
-        if progress_tracker:
-            progress_tracker.update_total_repositories(total_repos)
-        else:
-            console.print(f"Found {total_repos} repositories")
-
-        # Find matching PRs across all repositories
-        all_similar_prs = []
-
-        from .github_service import GitHubService
-
-        if progress_tracker:
-            progress_tracker.update_operation("Listing repositories...")
-
-        async def _find_similar():
-            svc = GitHubService(
-                token=token,
-                progress_tracker=progress_tracker,
-                debug_matching=debug_matching,
-            )
-            try:
-                only_automation = github_client.is_automation_author(source_pr.author)
-                return await svc.find_similar_prs(
-                    owner,
-                    source_pr,
-                    comparator,
-                    only_automation=only_automation,
-                )
-            finally:
-                await svc.close()
-
-        all_similar_prs = asyncio.run(_find_similar())
-
-        # Stop progress tracker and show results
-        if progress_tracker:
-            progress_tracker.stop()
-            summary = progress_tracker.get_summary()
-            elapsed_time = summary.get("elapsed_time")
-            total_prs_analyzed = summary.get("total_prs_analyzed")
-            completed_repositories = summary.get("completed_repositories")
-            similar_prs_found = summary.get("similar_prs_found")
-            errors_count = summary.get("errors_count", 0)
-            console.print(f"\n✅ Analysis completed in {elapsed_time}")
-            console.print(
-                f"📊 Analyzed {total_prs_analyzed} PRs across {completed_repositories} repositories"
-            )
-            console.print(f"🔍 Found {similar_prs_found} similar PRs")
-            if errors_count > 0:
-                console.print(f"⚠️  {errors_count} errors encountered during analysis")
-            console.print()
-
-        if not all_similar_prs:
-            console.print("❌ No similar PRs found in the organization")
-
-        console.print(f"Found {len(all_similar_prs)} similar PRs:")
-
-        for target_pr, comparison in all_similar_prs:
-            console.print(f"  • {target_pr.repository_full_name} #{target_pr.number}")
-            console.print(f"    {_format_condensed_similarity(comparison)}")
-
-        if not no_confirm:
-            # IMPORTANT: Each PR must produce exactly ONE line of output in this section
-            # This ensures clean, consistent evaluation reporting format
-            console.print("\n🔍 Dependamerge Evaluation\n")
-
-        # Add source PR to the list for parallel processing
-        all_prs_to_merge = all_similar_prs + [(source_pr, None)]
-
-        # Merge PRs in parallel using async merge manager
-        async def _merge_parallel():
-            async with AsyncMergeManager(
-                token=token,  # pyright: ignore[reportArgumentType]
-                merge_method=merge_method,
-                max_retries=MAX_RETRIES,
-                concurrency=10,  # Process up to 10 PRs concurrently
-                fix_out_of_date=not no_fix,  # Fix is default, --no-fix disables it
-                progress_tracker=progress_tracker,
-                preview_mode=not no_confirm,
-                dismiss_copilot=dismiss_copilot,
-                force_level=force,
-                github2gerrit_mode=github2gerrit_mode,
-                no_netrc=no_netrc,
-                netrc_file=netrc_file,
-            ) as merge_manager:
-                if not no_confirm:
-                    pass  # No merge message in preview mode
-                else:
-                    console.print(
-                        f"\n🚀 Merging {len(all_prs_to_merge)} pull requests..."
-                    )
-                results = await merge_manager.merge_prs_parallel(all_prs_to_merge)
-                return results
-
-        # Run the parallel merge process
-        merge_results = asyncio.run(_merge_parallel())
-
-        # Display results
-        if merge_results:
-            # Create a simple summary from results
-            merged_count = sum(1 for r in merge_results if r.status.value == "merged")
-            failed_count = sum(1 for r in merge_results if r.status.value == "failed")
-            skipped_count = sum(1 for r in merge_results if r.status.value == "skipped")
-            blocked_count = sum(1 for r in merge_results if r.status.value == "blocked")
-            total_to_merge = len(merge_results)
-            if not no_confirm:
-                console.print(f"\nMergeable {merged_count}/{total_to_merge} PRs")
-
-                # Generate continuation SHA and prompt user
-                if merged_count > 0:
-                    # Get commit message for SHA generation
-                    commit_messages = github_client.get_pull_request_commits(
-                        owner, repo_name, pr_number
-                    )
-                    first_commit_line = (
-                        commit_messages[0].split("\n")[0] if commit_messages else ""
-                    )
-                    continue_sha_hash = _generate_continue_sha(
-                        source_pr, first_commit_line
-                    )
-                    console.print()
-                    console.print(f"To proceed with merging enter: {continue_sha_hash}")
-
-                    try:
-                        # Skip interactive prompt in test mode
-                        if "pytest" in sys.modules or os.getenv("TESTING"):
-                            console.print(
-                                "⚠️  Test mode detected - skipping interactive prompt"
-                            )
-                            return
-
-                        user_input = input(
-                            "Enter the string above to continue (or press Enter to cancel): "
-                        ).strip()
-                        if user_input == continue_sha_hash:
-                            # Run actual merge on mergeable PRs only
-                            console.print(
-                                f"\n🔨 Merging {merged_count} mergeable pull requests..."
-                            )
-                            mergeable_prs = []
-                            for i, result in enumerate(merge_results):
-                                if (
-                                    result.status.value == "merged"
-                                ):  # These were preview "merged"
-                                    mergeable_prs.append(all_prs_to_merge[i])
-
-                            # Define async function for real merge
-                            async def _real_merge():
-                                async with AsyncMergeManager(
-                                    token=token,  # pyright: ignore[reportArgumentType]
-                                    merge_method=merge_method,
-                                    max_retries=MAX_RETRIES,
-                                    concurrency=10,
-                                    fix_out_of_date=not no_fix,
-                                    progress_tracker=progress_tracker,
-                                    preview_mode=False,  # Execute merge
-                                    dismiss_copilot=dismiss_copilot,
-                                    force_level=force,
-                                    github2gerrit_mode=github2gerrit_mode,
-                                    no_netrc=no_netrc,
-                                    netrc_file=netrc_file,
-                                ) as real_merge_manager:
-                                    return await real_merge_manager.merge_prs_parallel(
-                                        mergeable_prs
-                                    )
-
-                            # Run the real merge
-                            real_results = asyncio.run(_real_merge())
-
-                            # Display final results
-                            final_merged = sum(
-                                1 for r in real_results if r.status.value == "merged"
-                            )
-                            final_failed = sum(
-                                1 for r in real_results if r.status.value == "failed"
-                            )
-                            final_skipped = sum(
-                                1 for r in real_results if r.status.value == "skipped"
-                            )
-                            final_blocked = sum(
-                                1 for r in real_results if r.status.value == "blocked"
-                            )
-
-                            console.print(
-                                f"\n🚀 Final Results: {final_merged} merged, {final_failed} failed"
-                            )
-                            if final_skipped > 0:
-                                console.print(f"⏭️  Skipped {final_skipped} PRs")
-                            if final_blocked > 0:
-                                console.print(f"🛑 Blocked {final_blocked} PRs")
-                        elif user_input == "":
-                            console.print("❌ Merge cancelled by user.")
-                        else:
-                            console.print("❌ Invalid input. Merge cancelled.")
-                    except KeyboardInterrupt:
-                        console.print("\n❌ Merge cancelled by user.")
-                    except EOFError:
-                        console.print("\n❌ Merge cancelled.")
-
-                    return  # Exit after handling preview continuation
-                else:
-                    console.print("\n💡 No PRs are mergeable at this time.")
-
-            if failed_count > 0:
-                if not no_confirm:
-                    console.print(f"❌ Would fail to merge {failed_count} PRs")
-                else:
-                    console.print(f"❌ Failed {failed_count} PRs")
-            if skipped_count > 0:
-                console.print(f"⏭️  Skipped {skipped_count} PRs")
-            if blocked_count > 0:
-                console.print(f"🛑 Blocked {blocked_count} PRs")
-
-            if no_confirm:
-                console.print(
-                    f"📈 Final Results: {merged_count} merged, {failed_count} failed"
-                )
-
-        else:
-            console.print("❌ No PRs were processed")
+        _display_merge_results(merge_results, ctx.no_confirm)
 
     except DependamergeError as exc:
-        # Our structured errors handle display and exit themselves
-        if progress_tracker:
-            progress_tracker.stop()
+        if ctx.progress_tracker:
+            ctx.progress_tracker.stop()
         exc.display_and_exit()
     except (KeyboardInterrupt, SystemExit):
-        # Don't catch system interrupts or exits
-        if progress_tracker:
-            progress_tracker.stop()
+        if ctx.progress_tracker:
+            ctx.progress_tracker.stop()
         raise
     except typer.Exit:
-        # Handle typer exits (like closed PR errors) gracefully - already printed message
-        if progress_tracker:
-            progress_tracker.stop()
-        # Re-raise without additional error messages
+        if ctx.progress_tracker:
+            ctx.progress_tracker.stop()
         raise
-    except (GitError, RateLimitError, SecondaryRateLimitError, GraphQLError) as exc:
-        # Convert known errors to centralized error handling
-        if progress_tracker:
-            progress_tracker.stop()
+    except (
+        GitError,
+        RateLimitError,
+        SecondaryRateLimitError,
+        GraphQLError,
+    ) as exc:
+        if ctx.progress_tracker:
+            ctx.progress_tracker.stop()
         if isinstance(exc, GitError):
             converted_error = convert_git_error(exc)
-        else:  # GitHub API errors
+        else:
             converted_error = convert_github_api_error(exc)
         converted_error.display_and_exit()
     except Exception as e:
-        # Ensure progress tracker is stopped even if an unexpected error occurs
-        if progress_tracker:
-            progress_tracker.stop()
-
-        # Try to categorize the error
+        if ctx.progress_tracker:
+            ctx.progress_tracker.stop()
         if is_github_api_permission_error(e):
             exit_for_github_api_error(exception=e)
         elif is_network_error(e):
@@ -1197,6 +1411,38 @@ def merge(
                 details=str(e),
                 exception=e,
             )
+
+
+def _print_debug_matching(ctx: _MergeContext) -> None:
+    """Print debug matching information for the source PR."""
+    assert ctx.github_client is not None
+    assert ctx.source_pr is not None
+    assert ctx.comparator is not None
+
+    console.print("\n🔍 Debug Matching Information")
+    console.print(
+        "   Source PR automation status: "
+        f"{ctx.github_client.is_automation_author(ctx.source_pr.author)}"
+    )
+    console.print(
+        "   Extracted package: "
+        f"'{ctx.comparator._extract_package_name(ctx.source_pr.title)}'"
+    )
+    console.print(
+        f"   Similarity threshold: {ctx.similarity_threshold}"
+    )
+    if ctx.source_pr.body:
+        console.print(
+            f"   Body preview: {ctx.source_pr.body[:100]}..."
+        )
+        console.print(
+            "   Is dependabot body: "
+            f"{ctx.comparator._is_dependabot_body(ctx.source_pr.body)}"
+        )
+    else:
+        console.print("   ⚠️  Source PR has no body")
+    console.print()
+
 
 
 def _display_pr_info(
