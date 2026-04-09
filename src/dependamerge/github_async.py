@@ -239,6 +239,9 @@ class GitHubAsync:
         self._adaptive_delay = 0.0
         self._last_adaptive_update: float | None = None
 
+        # Cache for the authenticated user's login (never changes during a session)
+        self._authenticated_user_login: str | None = None
+
         mounts = None
         if proxies:
             mounts = {}
@@ -1258,19 +1261,23 @@ class GitHubAsync:
             try:
                 # For organization repos, check if user has bypass permissions
                 # This requires checking the user's role/permissions
-                user_data = await self.get("/user")
-                if isinstance(user_data, dict):
-                    username = user_data.get("login")
-                    if username:
-                        # Check collaborator permissions
-                        collab_data = await self.get(
-                            f"/repos/{owner}/{repo}/collaborators/{username}/permission"
-                        )
-                        if isinstance(collab_data, dict):
-                            permission_level = collab_data.get("permission")
-                            # admin permission can bypass
-                            if permission_level == "admin":
-                                return True, "User has admin collaborator permissions"
+                # Use cached login to avoid repeated /user calls
+                if self._authenticated_user_login is None:
+                    user_data = await self.get("/user")
+                    if isinstance(user_data, dict):
+                        self._authenticated_user_login = user_data.get("login")
+
+                username = self._authenticated_user_login
+                if username:
+                    # Check collaborator permissions
+                    collab_data = await self.get(
+                        f"/repos/{owner}/{repo}/collaborators/{username}/permission"
+                    )
+                    if isinstance(collab_data, dict):
+                        permission_level = collab_data.get("permission")
+                        # admin permission can bypass
+                        if permission_level == "admin":
+                            return True, "User has admin collaborator permissions"
             except Exception as e:
                 # If we can't check detailed permissions, continue with basic check
                 self.log.debug(
