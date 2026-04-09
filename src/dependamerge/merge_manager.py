@@ -119,6 +119,8 @@ class AsyncMergeManager:
         # Cache for organization-level settings to avoid repeated API calls
         # Key: org name, Value: org settings dict (or None on failure)
         self._org_settings_cache: dict[str, dict[str, Any] | None] = {}
+        self._org_settings_locks: dict[str, asyncio.Lock] = {}
+        self._org_settings_locks_lock = asyncio.Lock()
 
         # Track last merge exception per PR for better error reporting
         self._last_merge_exception: dict[str, Exception] = {}
@@ -2483,32 +2485,47 @@ class AsyncMergeManager:
         Returns:
             Organization settings dict, or None if the lookup failed
         """
+        # Fast path: no lock needed if already cached
         if owner in self._org_settings_cache:
             return self._org_settings_cache[owner]
 
-        if not self._github_client:
-            return None
+        # Acquire a per-owner lock so concurrent lookups for the same
+        # org are serialised, but lookups for *different* orgs proceed
+        # in parallel without blocking each other.
+        async with self._org_settings_locks_lock:
+            if owner not in self._org_settings_locks:
+                self._org_settings_locks[owner] = asyncio.Lock()
+            owner_lock = self._org_settings_locks[owner]
 
-        try:
-            org_data = await self._github_client.get(f"/orgs/{owner}")
-            if isinstance(org_data, dict):
-                self._org_settings_cache[owner] = org_data
-                # Log org-level details once, not per-PR
-                web_commit_signoff = org_data.get(
-                    "web_commit_signoff_required", False
-                )
-                if web_commit_signoff:
-                    self.log.debug(
-                        f"Organization {owner} requires commit signoff"
+        async with owner_lock:
+            # Re-check after acquiring the per-owner lock (another
+            # task may have populated the cache while we waited).
+            if owner in self._org_settings_cache:
+                return self._org_settings_cache[owner]
+
+            if not self._github_client:
+                return None
+
+            try:
+                org_data = await self._github_client.get(f"/orgs/{owner}")
+                if isinstance(org_data, dict):
+                    self._org_settings_cache[owner] = org_data
+                    # Log org-level details once, not per-PR
+                    web_commit_signoff = org_data.get(
+                        "web_commit_signoff_required", False
                     )
-                return org_data
-            else:
+                    if web_commit_signoff:
+                        self.log.debug(
+                            f"Organization {owner} requires commit signoff"
+                        )
+                    return org_data
+                else:
+                    self._org_settings_cache[owner] = None
+                    return None
+            except Exception as e:
+                self.log.debug(f"Could not check organization settings for {owner}: {e}")
                 self._org_settings_cache[owner] = None
                 return None
-        except Exception as e:
-            self.log.debug(f"Could not check organization settings for {owner}: {e}")
-            self._org_settings_cache[owner] = None
-            return None
 
     async def _test_merge_capability(
         self, owner: str, repo: str, pr_number: int, merge_method: str

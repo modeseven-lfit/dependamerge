@@ -1394,13 +1394,13 @@ class GitHubAsync:
                         )
                         if isinstance(collab_data, dict):
                             perm_level = collab_data.get("permission", "none")
-                            # write or admin is required for approve/merge/close/update
-                            if perm_level in ("write", "admin"):
+                            # write, maintain, or admin is required for approve/merge/close/update
+                            if perm_level in ("write", "maintain", "admin"):
                                 result["has_permission"] = True
                             else:
                                 result["error"] = (
                                     f"Token has '{perm_level}' access to "
-                                    f"{owner}/{repo} — write or admin is required"
+                                    f"{owner}/{repo} — write, maintain, or admin is required"
                                 )
                                 perms = OPERATION_PERMISSIONS.get(operation, {})
                                 result["guidance"] = {
@@ -1419,12 +1419,32 @@ class GitHubAsync:
                     # 404 "Branch not protected"; without it GitHub
                     # returns 403 "Resource not accessible".
                     #
-                    # Note: Administration: Read also gates access to the
-                    # actions/permissions endpoint, so this check
-                    # implicitly covers Workflows/Actions access too.
+                    # The repo metadata fetch is separated from the
+                    # branch-protection probe so that a 404 from
+                    # GET /repos/{owner}/{repo} (repo doesn't exist or
+                    # token can't see it) is NOT silently treated as
+                    # success.
+                    default_branch = "main"
+                    try:
+                        repo_data = await self.get(
+                            f"/repos/{owner}/{repo}"
+                        )
+                        if isinstance(repo_data, dict):
+                            default_branch = repo_data.get(
+                                "default_branch", "main"
+                            )
+                    except Exception:
+                        # Repo metadata fetch failed — token may lack
+                        # access.  Let the error propagate to the outer
+                        # handler which will surface it as a permission
+                        # error.  Do NOT fall through to treat this as
+                        # success.
+                        raise
+
                     try:
                         await self.get(
-                            f"/repos/{owner}/{repo}/branches/main/protection"
+                            f"/repos/{owner}/{repo}/branches/"
+                            f"{default_branch}/protection"
                         )
                         result["has_permission"] = True
                     except Exception as e:

@@ -272,13 +272,16 @@ class GerritChangeInfo(BaseModel):
                 submit_requirements_met = False
                 break
 
-        # Construct URL
+        # Construct URL via the centralised builder to ensure base_path
+        # is handled consistently (see GerritUrlBuilder).
         url = ""
         if host:
-            if base_path:
-                url = f"https://{host}/{base_path}/c/{project}/+/{number}"
-            else:
-                url = f"https://{host}/c/{project}/+/{number}"
+            from dependamerge.gerrit.urls import GerritUrlBuilder
+
+            builder = GerritUrlBuilder(
+                host=host, base_path=base_path, auto_discover=False
+            )
+            url = builder.change_url(project, number)
 
         # Timestamps
         created = data.get("created", "")

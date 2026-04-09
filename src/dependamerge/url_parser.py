@@ -374,10 +374,22 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
     host = parsed.hostname.lower()
     path = parsed.path.rstrip("/")
 
-    # Only GitHub repository URLs are supported
-    if not _is_github_url(host, path) and not _host_matches(host, "github.com"):
+    # Only github.com and actual subdomains of github.com (e.g.
+    # foo.github.com) are accepted.  _host_matches() checks for an
+    # exact match or a *.github.com suffix, so hosts like
+    # github.enterprise.com (a subdomain of enterprise.com, NOT
+    # github.com) are correctly rejected.
+    #
+    # GitHub Enterprise Server installations use arbitrary hostnames
+    # (e.g. ghe.corp.example.com) that cannot be reliably distinguished
+    # from non-GitHub hosts without explicit configuration.  GHE support
+    # (both repo-merge and single-PR) requires host-aware API base URL
+    # configuration, which is not yet implemented.
+    if not _host_matches(host, "github.com"):
         raise UrlParseError(
-            f"Repository URL parsing is only supported for GitHub: {url}"
+            f"Repository URL parsing is only supported for "
+            f"github.com hosts (got host: {host}). "
+            f"Use a direct PR URL for non-GitHub hosts."
         )
 
     # Try to extract owner/repo from the path
@@ -395,11 +407,22 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
             f"https://{host}/owner/repo"
         )
 
-    # Check that this is NOT a PR URL (has /pull/N)
-    if "pull" in parts and len(parts) > parts.index("pull") + 1:
+    # After stripping "pulls", require exactly 2 parts (owner/repo)
+    if len(parts) != 2:
+        # Check if this is a PR URL (owner/repo/pull/…) before giving a generic error.
+        # Match any path starting with /owner/repo/pull/ regardless of whether
+        # the PR segment is numeric — /pull/abc is still clearly a PR-shaped URL
+        # and deserves the more specific guidance.
+        if len(parts) >= 3 and parts[2] == "pull":
+            raise UrlParseError(
+                "This looks like a pull request URL, not a repository URL. "
+                "Pass the full PR URL (…/pull/<number>) directly to merge "
+                "a single PR, or use the repository URL (…/owner/repo) for "
+                "bulk operations."
+            )
         raise UrlParseError(
-            "URL appears to be a PR URL, not a repository URL. "
-            "Use parse_change_url() instead."
+            f"Invalid GitHub repository URL format. Expected: "
+            f"https://{host}/owner/repo"
         )
 
     owner = parts[0]

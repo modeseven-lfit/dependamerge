@@ -230,120 +230,120 @@ class TestAuthenticatedUserLoginCache:
     @pytest.mark.asyncio
     async def test_user_login_fetched_once(self, mocker):
         """GET /user should only be called once across multiple bypass checks."""
-        gh = self._make_github_async()
+        async with self._make_github_async() as gh:
+            call_log: list[str] = []
 
-        call_log: list[str] = []
+            async def mock_get(url: str):
+                call_log.append(url)
+                if url == "/user":
+                    return {"login": "test-user"}
+                if url.startswith("/repos/") and url.endswith("/permission"):
+                    return {"permission": "write"}
+                if url.startswith("/repos/"):
+                    return {"permissions": {"admin": False, "push": True}}
+                return {}
 
-        async def mock_get(url: str):
-            call_log.append(url)
-            if url == "/user":
-                return {"login": "test-user"}
-            if url.startswith("/repos/") and url.endswith("/permission"):
-                return {"permission": "write"}
-            if url.startswith("/repos/"):
-                return {"permissions": {"admin": False, "push": True}}
-            return {}
+            mocker.patch.object(gh, "get", side_effect=mock_get)
 
-        mocker.patch.object(gh, "get", side_effect=mock_get)
+            # Check bypass permissions for 3 different repos
+            await gh.check_user_can_bypass_protection("org", "repo-1")
+            await gh.check_user_can_bypass_protection("org", "repo-2")
+            await gh.check_user_can_bypass_protection("org", "repo-3")
 
-        # Check bypass permissions for 3 different repos
-        await gh.check_user_can_bypass_protection("org", "repo-1")
-        await gh.check_user_can_bypass_protection("org", "repo-2")
-        await gh.check_user_can_bypass_protection("org", "repo-3")
-
-        user_calls = [c for c in call_log if c == "/user"]
-        assert len(user_calls) == 1
-        assert gh._authenticated_user_login == "test-user"
+            user_calls = [c for c in call_log if c == "/user"]
+            assert len(user_calls) == 1
+            assert gh._authenticated_user_login == "test-user"
 
     @pytest.mark.asyncio
     async def test_cached_login_used_for_collaborator_check(self, mocker):
         """The cached username should be used in the collaborator permission URL."""
-        gh = self._make_github_async()
+        async with self._make_github_async() as gh:
+            collaborator_urls: list[str] = []
 
-        collaborator_urls: list[str] = []
+            async def mock_get(url: str):
+                if url == "/user":
+                    return {"login": "cached-user"}
+                if "/collaborators/" in url:
+                    collaborator_urls.append(url)
+                    return {"permission": "write"}
+                if url.startswith("/repos/"):
+                    return {"permissions": {"admin": False, "push": True}}
+                return {}
 
-        async def mock_get(url: str):
-            if url == "/user":
-                return {"login": "cached-user"}
-            if "/collaborators/" in url:
-                collaborator_urls.append(url)
-                return {"permission": "write"}
-            if url.startswith("/repos/"):
-                return {"permissions": {"admin": False, "push": True}}
-            return {}
+            mocker.patch.object(gh, "get", side_effect=mock_get)
 
-        mocker.patch.object(gh, "get", side_effect=mock_get)
+            await gh.check_user_can_bypass_protection("org", "my-repo")
 
-        await gh.check_user_can_bypass_protection("org", "my-repo")
-
-        assert len(collaborator_urls) == 1
-        assert "/collaborators/cached-user/permission" in collaborator_urls[0]
+            assert len(collaborator_urls) == 1
+            assert "/collaborators/cached-user/permission" in collaborator_urls[0]
 
     @pytest.mark.asyncio
     async def test_user_api_failure_does_not_break_bypass_check(self, mocker):
         """If GET /user fails, the bypass check should still complete gracefully."""
-        gh = self._make_github_async()
+        async with self._make_github_async() as gh:
 
-        async def mock_get(url: str):
-            if url == "/user":
-                raise Exception("user endpoint unavailable")
-            if url.startswith("/repos/"):
-                return {"permissions": {"admin": False, "push": True}}
-            return {}
+            async def mock_get(url: str):
+                if url == "/user":
+                    raise Exception("user endpoint unavailable")
+                if url.startswith("/repos/"):
+                    return {"permissions": {"admin": False, "push": True}}
+                return {}
 
-        mocker.patch.object(gh, "get", side_effect=mock_get)
+            mocker.patch.object(gh, "get", side_effect=mock_get)
 
-        can_bypass, reason = await gh.check_user_can_bypass_protection("org", "repo")
+            can_bypass, reason = await gh.check_user_can_bypass_protection(
+                "org", "repo"
+            )
 
-        # Should fall through to the push-permissions path
-        assert can_bypass is False
-        assert "push" in reason.lower() or "admin" in reason.lower()
+            # Should fall through to the push-permissions path
+            assert can_bypass is False
+            assert "push" in reason.lower() or "admin" in reason.lower()
 
     @pytest.mark.asyncio
     async def test_admin_shortcircuits_before_user_call(self, mocker):
         """If the repo permissions already show admin, GET /user should never be called."""
-        gh = self._make_github_async()
+        async with self._make_github_async() as gh:
+            call_log: list[str] = []
 
-        call_log: list[str] = []
+            async def mock_get(url: str):
+                call_log.append(url)
+                if url.startswith("/repos/"):
+                    return {"permissions": {"admin": True, "push": True}}
+                if url == "/user":
+                    return {"login": "should-not-reach"}
+                return {}
 
-        async def mock_get(url: str):
-            call_log.append(url)
-            if url.startswith("/repos/"):
-                return {"permissions": {"admin": True, "push": True}}
-            if url == "/user":
-                return {"login": "should-not-reach"}
-            return {}
+            mocker.patch.object(gh, "get", side_effect=mock_get)
 
-        mocker.patch.object(gh, "get", side_effect=mock_get)
+            can_bypass, reason = await gh.check_user_can_bypass_protection(
+                "org", "repo"
+            )
 
-        can_bypass, reason = await gh.check_user_can_bypass_protection("org", "repo")
-
-        assert can_bypass is True
-        assert "admin" in reason.lower()
-        assert "/user" not in call_log
+            assert can_bypass is True
+            assert "admin" in reason.lower()
+            assert "/user" not in call_log
 
     @pytest.mark.asyncio
     async def test_login_cache_survives_collaborator_exception(self, mocker):
         """If the collaborator check raises, the cached login should persist
         for subsequent calls."""
-        gh = self._make_github_async()
+        async with self._make_github_async() as gh:
+            call_count = {"user": 0}
 
-        call_count = {"user": 0}
+            async def mock_get(url: str):
+                if url == "/user":
+                    call_count["user"] += 1
+                    return {"login": "persistent-user"}
+                if "/collaborators/" in url:
+                    raise Exception("collaborator endpoint error")
+                if url.startswith("/repos/"):
+                    return {"permissions": {"admin": False, "push": True}}
+                return {}
 
-        async def mock_get(url: str):
-            if url == "/user":
-                call_count["user"] += 1
-                return {"login": "persistent-user"}
-            if "/collaborators/" in url:
-                raise Exception("collaborator endpoint error")
-            if url.startswith("/repos/"):
-                return {"permissions": {"admin": False, "push": True}}
-            return {}
+            mocker.patch.object(gh, "get", side_effect=mock_get)
 
-        mocker.patch.object(gh, "get", side_effect=mock_get)
+            await gh.check_user_can_bypass_protection("org", "repo-1")
+            await gh.check_user_can_bypass_protection("org", "repo-2")
 
-        await gh.check_user_can_bypass_protection("org", "repo-1")
-        await gh.check_user_can_bypass_protection("org", "repo-2")
-
-        assert call_count["user"] == 1
-        assert gh._authenticated_user_login == "persistent-user"
+            assert call_count["user"] == 1
+            assert gh._authenticated_user_login == "persistent-user"

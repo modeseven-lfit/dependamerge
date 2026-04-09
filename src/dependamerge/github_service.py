@@ -760,7 +760,7 @@ class GitHubService:
             results.append(pr_info)
 
         if self._progress:
-            self._progress.complete_repository(len(results))
+            self._progress.complete_repository(0)
 
         return results
 

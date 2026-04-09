@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 import typer
@@ -507,11 +508,27 @@ def _check_merge_permissions(ctx: _MergeContext) -> None:
 
     try:
         perm_results = asyncio.run(_check())
+        # Separate blocking failures from advisory warnings.
+        # branch_protection (Administration: Read) is advisory — the
+        # merge flow tolerates missing visibility and the token can
+        # still approve/merge successfully without it.
+        _ADVISORY_OPS = {"branch_protection"}
         missing_perms = [
             op
             for op, result in perm_results.items()
-            if not result["has_permission"]
+            if not result["has_permission"] and op not in _ADVISORY_OPS
         ]
+        advisory_perms = [
+            op
+            for op, result in perm_results.items()
+            if not result["has_permission"] and op in _ADVISORY_OPS
+        ]
+        if advisory_perms:
+            for op in advisory_perms:
+                result = perm_results[op]
+                console.print(
+                    f"⚠️  {op}: {result['error']} (non-blocking)"
+                )
         if missing_perms:
             console.print("\n❌ Token Permission Check Failed:\n")
             for op in missing_perms:
@@ -897,6 +914,17 @@ def _handle_repo_merge(
         ctx: Shared merge context populated with CLI parameters.
     """
     from .github_service import GitHubService
+    from .url_parser import _host_matches
+
+    # --- Guard: repo-merge only supports github.com for now ---
+    if not _host_matches(parsed_repo.host, "github.com"):
+        console.print(
+            "❌ Repository-scoped merge is currently only supported "
+            f"for github.com (got host: {parsed_repo.host}).\n"
+            "   GitHub Enterprise support requires API base URL "
+            "configuration — use a direct PR URL instead."
+        )
+        raise typer.Exit(code=1)
 
     # --- Initialise GitHub client & token ---
     ctx.github_client = GitHubClient(ctx.token)
@@ -916,6 +944,7 @@ def _handle_repo_merge(
     # --- Progress tracker ---
     if ctx.show_progress:
         ctx.progress_tracker = MergeProgressTracker(ctx.owner)
+        ctx.progress_tracker.update_total_repositories(1)
         ctx.progress_tracker.start()
 
     # --- Fetch open PRs for the repository ---
@@ -959,7 +988,7 @@ def _handle_repo_merge(
     # GraphQL returns authors without the "[bot]" suffix (e.g.
     # "dependabot" not "dependabot[bot]"), so the exact-match
     # GitHubClient.is_automation_author() would misclassify them.
-    def _is_auto(author: str) -> bool:
+    def _is_auto(author: str | None) -> bool:
         author_lower = (author or "").lower()
         return any(tool in author_lower for tool in AUTOMATION_TOOLS)
 
@@ -1006,15 +1035,11 @@ def _handle_repo_merge(
             "proceeding."
         )
         try:
-            if "pytest" in sys.modules or os.getenv("TESTING"):
-                console.print(
-                    "⚠️  Test mode detected "
-                    "- skipping interactive prompt"
-                )
-                return
-            user_input = input(
+            user_input = typer.prompt(
                 "Type 'yes' to include human PRs, "
-                "or press Enter to skip them: "
+                "or press Enter to skip them",
+                default="",
+                show_default=False,
             ).strip().lower()
             if user_input != "yes":
                 console.print(
@@ -1028,7 +1053,7 @@ def _handle_repo_merge(
                         "❌ No automation PRs remain to merge."
                     )
                     return
-        except (KeyboardInterrupt, EOFError):
+        except (KeyboardInterrupt, EOFError, typer.Abort):
             console.print("\n❌ Merge cancelled by user.")
             return
 
@@ -1040,14 +1065,20 @@ def _handle_repo_merge(
     # --- Preview / merge using existing infrastructure ---
     if ctx.show_progress:
         ctx.progress_tracker = MergeProgressTracker(ctx.owner)
+        ctx.progress_tracker.update_total_repositories(1)
+        ctx.progress_tracker.start()
 
-    # Serialise merges for repo-scoped operations: all PRs target
-    # the same repository, so parallel approve+merge would race
-    # against GitHub's branch-protection propagation and cause
-    # spurious "branch protection" failures.
-    merge_results = _run_parallel_merge(
-        ctx, all_prs_to_merge, preview=not ctx.no_confirm, concurrency=1
-    )
+    try:
+        # Serialise merges for repo-scoped operations: all PRs target
+        # the same repository, so parallel approve+merge would race
+        # against GitHub's branch-protection propagation and cause
+        # spurious "branch protection" failures.
+        merge_results = _run_parallel_merge(
+            ctx, all_prs_to_merge, preview=not ctx.no_confirm, concurrency=1
+        )
+    finally:
+        if ctx.show_progress and ctx.progress_tracker:
+            ctx.progress_tracker.stop()
 
     if not merge_results:
         console.print("❌ No PRs were processed")
@@ -1108,16 +1139,11 @@ def _handle_repo_preview_confirmation(
     )
 
     try:
-        if "pytest" in sys.modules or os.getenv("TESTING"):
-            console.print(
-                "⚠️  Test mode detected "
-                "- skipping interactive prompt"
-            )
-            return
-
-        user_input = input(
+        user_input = typer.prompt(
             "Enter the string above to continue "
-            "(or press Enter to cancel): "
+            "(or press Enter to cancel)",
+            default="",
+            show_default=False,
         ).strip()
 
         if user_input == confirm_hash:
@@ -1128,10 +1154,8 @@ def _handle_repo_preview_confirmation(
             console.print("❌ Merge cancelled by user.")
         else:
             console.print("❌ Invalid input. Merge cancelled.")
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError, typer.Abort):
         console.print("\n❌ Merge cancelled by user.")
-    except EOFError:
-        console.print("\n❌ Merge cancelled.")
 
 
 def _execute_repo_confirmed_merge(
@@ -1152,9 +1176,18 @@ def _execute_repo_confirmed_merge(
         f"\n🔨 Merging {merged_count} mergeable pull requests..."
     )
 
-    real_results = _run_parallel_merge(
-        ctx, mergeable_prs, preview=False, concurrency=1
-    )
+    if ctx.show_progress:
+        ctx.progress_tracker = MergeProgressTracker(ctx.owner)
+        ctx.progress_tracker.update_total_repositories(1)
+        ctx.progress_tracker.start()
+
+    try:
+        real_results = _run_parallel_merge(
+            ctx, mergeable_prs, preview=False, concurrency=1
+        )
+    finally:
+        if ctx.show_progress and ctx.progress_tracker:
+            ctx.progress_tracker.stop()
 
     final_merged = sum(
         1 for r in real_results if r.status.value == "merged"
@@ -1554,14 +1587,36 @@ def merge(
     # Try as a specific PR/change URL first
     parsed_url: ParsedUrl | None = None
     parsed_repo: ParsedRepoUrl | None = None
+    change_err: UrlParseError | None = None
     try:
         parsed_url = parse_change_url(pr_url)
-    except UrlParseError:
+    except UrlParseError as e:
+        change_err = e
         # Not a PR URL — try as a repository URL
         try:
             parsed_repo = parse_repo_url(pr_url)
         except UrlParseError as repo_err:
-            console.print(f"❌ Invalid URL: {repo_err}")
+            # Show the most relevant error: if the URL targets a
+            # non-github.com host the original parse_change_url error
+            # gives host-appropriate guidance (e.g. Gerrit tips),
+            # whereas parse_repo_url only talks about github.com.
+            from .url_parser import _host_matches
+
+            try:
+                # Prepend scheme if missing so urlparse can extract the
+                # hostname.  Without a scheme, schemeless URLs like
+                # "gerrit.example.org/..." are parsed as a path with no
+                # hostname, causing the wrong error to be shown.
+                _norm = pr_url
+                if not _norm.startswith(("http://", "https://")):
+                    _norm = "https://" + _norm
+                host = urlparse(_norm).hostname or ""
+            except Exception:
+                host = ""
+            if host and not _host_matches(host.lower(), "github.com"):
+                console.print(f"❌ Invalid URL: {change_err}")
+            else:
+                console.print(f"❌ Invalid URL: {repo_err}")
             raise typer.Exit(1) from None
 
     # --- Route: Gerrit change ---

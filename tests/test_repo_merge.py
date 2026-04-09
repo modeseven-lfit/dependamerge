@@ -4,6 +4,7 @@
 """Tests for repository-scoped bulk merge feature."""
 
 import hashlib
+import re
 from unittest.mock import Mock, patch
 
 import pytest
@@ -21,6 +22,11 @@ from dependamerge.url_parser import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def _mock_asyncio_run(side_effects: list[object]):
@@ -41,7 +47,10 @@ def _mock_asyncio_run(side_effects: list[object]):
             result = side_effects[call_index]
             call_index += 1
             return result
-        return None
+        raise AssertionError(
+            f"Unexpected asyncio.run call #{call_index + 1} "
+            f"(only {len(side_effects)} side-effects provided)"
+        )
 
     return _side_effect
 
@@ -142,9 +151,50 @@ class TestParseRepoUrl:
         with pytest.raises(UrlParseError, match="URL cannot be empty"):
             parse_repo_url("   ")
 
-    def test_repo_url_non_github_raises(self):
-        with pytest.raises(UrlParseError, match="only supported for GitHub"):
+    def test_repo_url_gerrit_style_raises(self):
+        with pytest.raises(UrlParseError, match="only supported for github.com"):
+            parse_repo_url("https://gerrit.example.org/c/project/+/12345")
+
+    def test_repo_url_gerrit_style_no_plus_rejected(self):
+        """A non-github.com host is rejected regardless of path shape."""
+        with pytest.raises(UrlParseError, match="only supported for github.com"):
+            parse_repo_url("https://gerrit.example.org/c/repo")
+
+    def test_repo_url_ghe_rejected(self):
+        """GHE hosts are not github.com subdomains — rejected at parse time."""
+        with pytest.raises(UrlParseError, match="only supported for github.com"):
+            parse_repo_url("https://github.enterprise.com/owner/repo")
+
+    def test_repo_url_github_subdomain_accepted(self):
+        """Actual github.com subdomains (e.g. foo.github.com) are accepted."""
+        result = parse_repo_url("https://foo.github.com/owner/repo")
+        assert result.source == ChangeSource.GITHUB
+        assert result.host == "foo.github.com"
+        assert result.owner == "owner"
+        assert result.repo == "repo"
+
+    def test_repo_url_non_github_host_rejected(self):
+        # Non-github.com hosts are rejected at parse time to prevent misrouting
+        with pytest.raises(UrlParseError, match="only supported for github.com"):
             parse_repo_url("https://gitlab.com/owner/repo")
+
+    def test_repo_url_extra_segments_raises(self):
+        with pytest.raises(UrlParseError, match="Invalid GitHub repository URL"):
+            parse_repo_url("https://github.com/owner/repo/issues")
+
+    def test_repo_url_settings_raises(self):
+        with pytest.raises(UrlParseError, match="Invalid GitHub repository URL"):
+            parse_repo_url("https://github.com/owner/repo/settings")
+
+    def test_repo_url_pr_url_raises(self):
+        with pytest.raises(UrlParseError, match="looks like a pull request URL"):
+            parse_repo_url("https://github.com/owner/repo/pull/123")
+
+    def test_repo_url_owner_named_pull_accepted(self):
+        # An owner literally named "pull" should not be rejected
+        result = parse_repo_url("https://github.com/pull/repo")
+        assert result.owner == "pull"
+        assert result.repo == "repo"
 
     def test_repo_url_too_short_raises(self):
         with pytest.raises(UrlParseError, match="Invalid GitHub repository URL"):
@@ -167,7 +217,8 @@ class TestParseRepoUrl:
     def test_repo_url_case_insensitive_host(self):
         result = parse_repo_url("https://GitHub.COM/Owner/Repo")
         assert result.host == "github.com"
-        # Owner/repo are case-sensitive on GitHub
+        # Owner/repo casing is preserved as provided (GitHub resolves
+        # casing server-side, but we store what the user gave us)
         assert result.owner == "Owner"
         assert result.repo == "Repo"
 
@@ -214,6 +265,7 @@ class TestMergeRepoUrl:
                 {
                     "approve": {"has_permission": True},
                     "merge": {"has_permission": True},
+                    "branch_protection": {"has_permission": True},
                 },
                 [],
             ]
@@ -229,6 +281,7 @@ class TestMergeRepoUrl:
             ],
         )
         # Should not see the URL parse error
+        assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         assert "❌ Invalid URL:" not in result.stdout
 
     @patch("dependamerge.cli.asyncio.run")
@@ -245,6 +298,7 @@ class TestMergeRepoUrl:
                 {
                     "approve": {"has_permission": True},
                     "merge": {"has_permission": True},
+                    "branch_protection": {"has_permission": True},
                 },
                 [],
             ]
@@ -259,6 +313,7 @@ class TestMergeRepoUrl:
                 "fake_token",
             ],
         )
+        assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         assert "❌ Invalid URL:" not in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")
@@ -293,6 +348,7 @@ class TestMergeRepoUrl:
                 {
                     "approve": {"has_permission": True},
                     "merge": {"has_permission": True},
+                    "branch_protection": {"has_permission": True},
                 },
                 # fetch PRs (only automation)
                 [auto_pr],
@@ -311,6 +367,7 @@ class TestMergeRepoUrl:
             ],
         )
 
+        assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         assert "Repository mode" in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")
@@ -327,6 +384,7 @@ class TestMergeRepoUrl:
                 {
                     "approve": {"has_permission": True},
                     "merge": {"has_permission": True},
+                    "branch_protection": {"has_permission": True},
                 },
                 # fetch PRs
                 [],
@@ -343,6 +401,7 @@ class TestMergeRepoUrl:
             ],
         )
 
+        assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         assert "No open" in result.stdout
         assert "PRs found" in result.stdout
 
@@ -374,9 +433,12 @@ class TestMergeRepoUrl:
                 {
                     "approve": {"has_permission": True},
                     "merge": {"has_permission": True},
+                    "branch_protection": {"has_permission": True},
                 },
                 # fetch PRs (both auto and human since only_automation=False)
                 [auto_pr, human_pr],
+                # preview merge phase (returns MergeResult list)
+                [],
             ]
         )
 
@@ -391,6 +453,7 @@ class TestMergeRepoUrl:
             ],
         )
 
+        assert result.exit_code == 0
         # Should show human PRs warning
         assert "Repository mode" in result.stdout
 
@@ -421,6 +484,7 @@ class TestMergeRepoUrl:
                 {
                     "approve": {"has_permission": True},
                     "merge": {"has_permission": True},
+                    "branch_protection": {"has_permission": True},
                 },
                 # fetch PRs (only automation even though flag was given)
                 [auto_pr],
@@ -440,21 +504,21 @@ class TestMergeRepoUrl:
             ],
         )
 
+        assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         # Should NOT show the human PR confirmation prompt
         assert "Human-authored PRs are included" not in result.stdout
 
     def test_include_human_prs_help_shown(self):
         """The --include-human-prs flag should appear in help text."""
         result = self.runner.invoke(app, ["merge", "--help"])
-        assert "--include-human-prs" in result.stdout
+        plain = _strip_ansi(result.stdout)
+        assert "--include-human-prs" in plain
 
     def test_repo_url_formats_in_help(self):
         """Repository URL format docs should appear in merge command help."""
         result = self.runner.invoke(app, ["merge", "--help"])
-        assert (
-            "repository url" in result.stdout.lower()
-            or "Repository URL" in result.stdout
-        )
+        plain = _strip_ansi(result.stdout)
+        assert "repository url" in plain.lower() or "Repository URL" in plain
 
     def test_invalid_url_still_rejected(self):
         """A completely invalid URL should still be rejected."""
@@ -493,9 +557,12 @@ class TestMergeRepoUrl:
                 {
                     "approve": {"has_permission": True},
                     "merge": {"has_permission": True},
+                    "branch_protection": {"has_permission": True},
                 },
                 # fetch PRs (both types with --include-human-prs)
                 [auto_pr, human_pr],
+                # preview merge phase (returns MergeResult list)
+                [],
             ]
         )
 
@@ -510,6 +577,7 @@ class TestMergeRepoUrl:
             ],
         )
 
+        assert result.exit_code == 0
         # Should show counts
         assert "Automation PRs:" in result.stdout
         assert "Human PRs:" in result.stdout
@@ -548,6 +616,7 @@ class TestMergeRepoUrl:
                 {
                     "approve": {"has_permission": True},
                     "merge": {"has_permission": True},
+                    "branch_protection": {"has_permission": True},
                 },
                 # fetch PRs
                 [auto_pr],
@@ -567,6 +636,7 @@ class TestMergeRepoUrl:
             ],
         )
 
+        assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         assert "Final Results:" in result.stdout
 
 

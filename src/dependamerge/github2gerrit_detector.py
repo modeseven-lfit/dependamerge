@@ -233,7 +233,9 @@ def build_gerrit_change_url_from_mapping(
     Build a Gerrit web change URL from mapping metadata.
 
     This constructs a URL suitable for posting as a comment on the GitHub PR
-    after the Gerrit change has been submitted.
+    after the Gerrit change has been submitted.  URL construction is delegated
+    to :class:`~dependamerge.gerrit.urls.GerritUrlBuilder` to ensure the
+    base path is handled consistently.
 
     Args:
         mapping: The parsed mapping containing Change-IDs and topic.
@@ -244,15 +246,17 @@ def build_gerrit_change_url_from_mapping(
         A Gerrit change URL string.  If the exact change number is not
         available in the mapping, returns a search URL using the Change-ID.
     """
-    base = f"https://{gerrit_host}"
-    if gerrit_base_path:
-        base = f"{base}/{gerrit_base_path}"
+    from dependamerge.gerrit.urls import GerritUrlBuilder
+
+    builder = GerritUrlBuilder(
+        host=gerrit_host, base_path=gerrit_base_path, auto_discover=False
+    )
 
     # Use the primary Change-ID for the search URL
     change_id = mapping.primary_change_id
     if change_id:
-        return f"{base}/q/{change_id}"
-    return base
+        return builder.web_url(f"q/{change_id}")
+    return builder.web_url()
 
 
 def build_gerrit_submission_comment(
