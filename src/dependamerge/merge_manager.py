@@ -118,7 +118,7 @@ class AsyncMergeManager:
 
         # Cache for organization-level settings to avoid repeated API calls
         # Key: org name, Value: org settings dict (or None on failure)
-        self._org_settings_cache: dict[str, dict | None] = {}
+        self._org_settings_cache: dict[str, dict[str, Any] | None] = {}
 
         # Track last merge exception per PR for better error reporting
         self._last_merge_exception: dict[str, Exception] = {}
@@ -2468,7 +2468,7 @@ class AsyncMergeManager:
         # For other failure types, don't retry
         return False
 
-    async def _get_org_settings(self, owner: str) -> dict | None:
+    async def _get_org_settings(self, owner: str) -> dict[str, Any] | None:
         """
         Get organization-level settings, with caching.
 

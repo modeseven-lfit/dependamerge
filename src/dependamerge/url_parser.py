@@ -71,6 +71,33 @@ class ParsedUrl:
         return self.source == ChangeSource.GERRIT
 
 
+@dataclass(frozen=True)
+class ParsedRepoUrl:
+    """
+    Parsed repository URL (not a specific PR/change).
+
+    Attributes:
+        source: The code review platform (GitHub only for now).
+        host: The hostname of the server.
+        owner: The repository owner/organization.
+        repo: The repository name.
+        project: The full "owner/repo" string.
+        original_url: The original URL that was parsed.
+    """
+
+    source: ChangeSource
+    host: str
+    owner: str
+    repo: str
+    project: str
+    original_url: str
+
+    @property
+    def is_github(self) -> bool:
+        """Check if this URL is from GitHub."""
+        return self.source == ChangeSource.GITHUB
+
+
 def _host_matches(
     hostname: str,
     target: str,
@@ -310,11 +337,91 @@ def detect_source(url: str) -> ChangeSource:
         raise UrlParseError(f"Cannot determine platform for URL: {url}")
 
 
+def parse_repo_url(url: str) -> ParsedRepoUrl:
+    """
+    Parse a GitHub repository URL (not a specific PR).
+
+    Supports formats:
+        https://github.com/owner/repo
+        https://github.com/owner/repo/
+        https://github.com/owner/repo/pulls
+
+    Args:
+        url: The URL to parse.
+
+    Returns:
+        A ParsedRepoUrl instance with the extracted components.
+
+    Raises:
+        UrlParseError: If the URL format is not recognized as a valid repository URL.
+    """
+    url = url.strip()
+    if not url:
+        raise UrlParseError("URL cannot be empty")
+
+    # Ensure URL has a scheme
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        raise UrlParseError(f"Invalid URL format: {exc}") from exc
+
+    if not parsed.hostname:
+        raise UrlParseError("URL must include a hostname")
+
+    host = parsed.hostname.lower()
+    path = parsed.path.rstrip("/")
+
+    # Only GitHub repository URLs are supported
+    if not _is_github_url(host, path) and not _host_matches(host, "github.com"):
+        raise UrlParseError(
+            f"Repository URL parsing is only supported for GitHub: {url}"
+        )
+
+    # Try to extract owner/repo from the path
+    # Expected: /owner/repo or /owner/repo/pulls
+    # Strip the path, remove "pulls" suffix if present
+    parts = [p for p in path.split("/") if p]
+
+    # Remove "pulls" suffix if present
+    if parts and parts[-1] == "pulls":
+        parts = parts[:-1]
+
+    if len(parts) < 2:
+        raise UrlParseError(
+            f"Invalid GitHub repository URL format. Expected: "
+            f"https://{host}/owner/repo"
+        )
+
+    # Check that this is NOT a PR URL (has /pull/N)
+    if "pull" in parts and len(parts) > parts.index("pull") + 1:
+        raise UrlParseError(
+            "URL appears to be a PR URL, not a repository URL. "
+            "Use parse_change_url() instead."
+        )
+
+    owner = parts[0]
+    repo = parts[1]
+
+    return ParsedRepoUrl(
+        source=ChangeSource.GITHUB,
+        host=host,
+        owner=owner,
+        repo=repo,
+        project=f"{owner}/{repo}",
+        original_url=url,
+    )
+
+
 __all__ = [
     "ChangeSource",
+    "ParsedRepoUrl",
     "ParsedUrl",
     "UrlParseError",
     "_host_matches",
     "detect_source",
     "parse_change_url",
+    "parse_repo_url",
 ]
