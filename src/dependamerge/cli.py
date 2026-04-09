@@ -942,10 +942,19 @@ def _handle_repo_merge(
         return
 
     # --- Classify PRs as automation vs human ---
+    # Use AUTOMATION_TOOLS substring matching (consistent with
+    # GitHubService.fetch_repo_open_prs and _is_automation_author).
+    # GraphQL returns authors without the "[bot]" suffix (e.g.
+    # "dependabot" not "dependabot[bot]"), so the exact-match
+    # GitHubClient.is_automation_author() would misclassify them.
+    def _is_auto(author: str) -> bool:
+        author_lower = (author or "").lower()
+        return any(tool in author_lower for tool in AUTOMATION_TOOLS)
+
     automation_prs: list[PullRequestInfo] = []
     human_prs: list[PullRequestInfo] = []
     for pr in repo_prs:
-        if ctx.github_client.is_automation_author(pr.author):
+        if _is_auto(pr.author):
             automation_prs.append(pr)
         else:
             human_prs.append(pr)
@@ -965,8 +974,7 @@ def _handle_repo_merge(
 
     # List PRs that will be processed
     for pr in repo_prs:
-        is_auto = ctx.github_client.is_automation_author(pr.author)
-        icon = "🤖" if is_auto else "👤"
+        icon = "🤖" if _is_auto(pr.author) else "👤"
         console.print(
             f"  {icon} #{pr.number} {pr.title} "
             f"(by {pr.author})"

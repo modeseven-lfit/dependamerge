@@ -23,6 +23,29 @@ from dependamerge.url_parser import (
 # ---------------------------------------------------------------------------
 
 
+def _mock_asyncio_run(side_effects: list[object]):
+    """Create a mock for asyncio.run that properly closes coroutines.
+
+    When asyncio.run is mocked, the coroutine object passed to it is never
+    awaited and gets garbage-collected, producing RuntimeWarning.  This
+    helper closes each coroutine before returning the canned value so the
+    warning is never emitted.
+    """
+    call_index = 0
+
+    def _side_effect(coro):
+        nonlocal call_index
+        # Close the coroutine so Python doesn't warn about it
+        coro.close()
+        if call_index < len(side_effects):
+            result = side_effects[call_index]
+            call_index += 1
+            return result
+        return None
+
+    return _side_effect
+
+
 def _make_pr(
     number: int,
     author: str = "dependabot[bot]",
@@ -177,10 +200,25 @@ class TestMergeRepoUrl:
     def setup_method(self):
         self.runner = CliRunner()
 
-    def test_repo_url_is_accepted(self):
+    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli.GitHubClient")
+    def test_repo_url_is_accepted(self, mock_client_class, mock_asyncio_run):
         """Verify that a repo URL doesn't produce 'Invalid URL' error."""
-        # Without a valid token the command will fail, but it should NOT
-        # fail with "Invalid URL" — it should get past URL parsing.
+        mock_client = Mock()
+        mock_client.token = "fake_token"
+        mock_client_class.return_value = mock_client
+
+        # Permissions check, then fetch PRs
+        mock_asyncio_run.side_effect = _mock_asyncio_run(
+            [
+                {
+                    "approve": {"has_permission": True},
+                    "merge": {"has_permission": True},
+                },
+                [],
+            ]
+        )
+
         result = self.runner.invoke(
             app,
             [
@@ -193,7 +231,25 @@ class TestMergeRepoUrl:
         # Should not see the URL parse error
         assert "❌ Invalid URL:" not in result.stdout
 
-    def test_repo_url_trailing_slash_accepted(self):
+    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli.GitHubClient")
+    def test_repo_url_trailing_slash_accepted(
+        self, mock_client_class, mock_asyncio_run
+    ):
+        mock_client = Mock()
+        mock_client.token = "fake_token"
+        mock_client_class.return_value = mock_client
+
+        mock_asyncio_run.side_effect = _mock_asyncio_run(
+            [
+                {
+                    "approve": {"has_permission": True},
+                    "merge": {"has_permission": True},
+                },
+                [],
+            ]
+        )
+
         result = self.runner.invoke(
             app,
             [
@@ -231,14 +287,19 @@ class TestMergeRepoUrl:
         # First asyncio.run call is _check (permissions) — succeed
         # Second asyncio.run call is _fetch_prs — return auto_pr only
         # (because only_automation=True filters out human_pr)
-        mock_asyncio_run.side_effect = [
-            # permissions check
-            {"approve": {"has_permission": True}, "merge": {"has_permission": True}},
-            # fetch PRs (only automation)
-            [auto_pr],
-            # parallel merge (preview)
-            [],
-        ]
+        mock_asyncio_run.side_effect = _mock_asyncio_run(
+            [
+                # permissions check
+                {
+                    "approve": {"has_permission": True},
+                    "merge": {"has_permission": True},
+                },
+                # fetch PRs (only automation)
+                [auto_pr],
+                # parallel merge (preview)
+                [],
+            ]
+        )
 
         result = self.runner.invoke(
             app,
@@ -260,12 +321,17 @@ class TestMergeRepoUrl:
         mock_client.token = "test_token"
         mock_client_class.return_value = mock_client
 
-        mock_asyncio_run.side_effect = [
-            # permissions check
-            {"approve": {"has_permission": True}, "merge": {"has_permission": True}},
-            # fetch PRs
-            [],
-        ]
+        mock_asyncio_run.side_effect = _mock_asyncio_run(
+            [
+                # permissions check
+                {
+                    "approve": {"has_permission": True},
+                    "merge": {"has_permission": True},
+                },
+                # fetch PRs
+                [],
+            ]
+        )
 
         result = self.runner.invoke(
             app,
@@ -302,12 +368,17 @@ class TestMergeRepoUrl:
         )
         mock_client_class.return_value = mock_client
 
-        mock_asyncio_run.side_effect = [
-            # permissions check
-            {"approve": {"has_permission": True}, "merge": {"has_permission": True}},
-            # fetch PRs (both auto and human since only_automation=False)
-            [auto_pr, human_pr],
-        ]
+        mock_asyncio_run.side_effect = _mock_asyncio_run(
+            [
+                # permissions check
+                {
+                    "approve": {"has_permission": True},
+                    "merge": {"has_permission": True},
+                },
+                # fetch PRs (both auto and human since only_automation=False)
+                [auto_pr, human_pr],
+            ]
+        )
 
         result = self.runner.invoke(
             app,
@@ -344,14 +415,19 @@ class TestMergeRepoUrl:
         )
         mock_client_class.return_value = mock_client
 
-        mock_asyncio_run.side_effect = [
-            # permissions check
-            {"approve": {"has_permission": True}, "merge": {"has_permission": True}},
-            # fetch PRs (only automation even though flag was given)
-            [auto_pr],
-            # preview merge
-            [],
-        ]
+        mock_asyncio_run.side_effect = _mock_asyncio_run(
+            [
+                # permissions check
+                {
+                    "approve": {"has_permission": True},
+                    "merge": {"has_permission": True},
+                },
+                # fetch PRs (only automation even though flag was given)
+                [auto_pr],
+                # preview merge
+                [],
+            ]
+        )
 
         result = self.runner.invoke(
             app,
@@ -376,7 +452,7 @@ class TestMergeRepoUrl:
         """Repository URL format docs should appear in merge command help."""
         result = self.runner.invoke(app, ["merge", "--help"])
         assert (
-            "repository URL" in result.stdout.lower()
+            "repository url" in result.stdout.lower()
             or "Repository URL" in result.stdout
         )
 
@@ -411,12 +487,17 @@ class TestMergeRepoUrl:
         )
         mock_client_class.return_value = mock_client
 
-        mock_asyncio_run.side_effect = [
-            # permissions check
-            {"approve": {"has_permission": True}, "merge": {"has_permission": True}},
-            # fetch PRs (both types with --include-human-prs)
-            [auto_pr, human_pr],
-        ]
+        mock_asyncio_run.side_effect = _mock_asyncio_run(
+            [
+                # permissions check
+                {
+                    "approve": {"has_permission": True},
+                    "merge": {"has_permission": True},
+                },
+                # fetch PRs (both types with --include-human-prs)
+                [auto_pr, human_pr],
+            ]
+        )
 
         result = self.runner.invoke(
             app,
@@ -461,14 +542,19 @@ class TestMergeRepoUrl:
             status=MergeStatus.MERGED,
         )
 
-        mock_asyncio_run.side_effect = [
-            # permissions check
-            {"approve": {"has_permission": True}, "merge": {"has_permission": True}},
-            # fetch PRs
-            [auto_pr],
-            # actual merge (not preview)
-            [merge_result],
-        ]
+        mock_asyncio_run.side_effect = _mock_asyncio_run(
+            [
+                # permissions check
+                {
+                    "approve": {"has_permission": True},
+                    "merge": {"has_permission": True},
+                },
+                # fetch PRs
+                [auto_pr],
+                # actual merge (not preview)
+                [merge_result],
+            ]
+        )
 
         result = self.runner.invoke(
             app,
