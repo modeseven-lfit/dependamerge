@@ -498,7 +498,7 @@ def _check_merge_permissions(ctx: _MergeContext) -> None:
 
     async def _check() -> dict[str, dict[str, Any]]:
         async with GitHubAsync(token=ctx.token) as client:
-            operations = ["approve", "merge"]
+            operations = ["approve", "merge", "branch_protection"]
             if not ctx.no_fix:
                 operations.append("update_branch")
             return await client.check_token_permissions(
