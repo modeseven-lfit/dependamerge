@@ -695,15 +695,27 @@ def _run_parallel_merge(
         tuple[PullRequestInfo, ComparisonResult | None]
     ],
     preview: bool,
+    concurrency: int = 10,
 ) -> list[MergeResult]:
-    """Execute a parallel merge (preview or real) and return results."""
+    """Execute a parallel merge (preview or real) and return results.
+
+    Args:
+        ctx: Shared merge context.
+        prs_to_merge: PRs to process.
+        preview: If True, run in preview mode without side effects.
+        concurrency: Maximum number of concurrent merge workers.
+            For org-wide merges (PRs spread across repos) the default
+            of 10 is fine.  For repo-scoped merges (all PRs in the
+            same repo) use 1 to serialise operations and give GitHub
+            time to propagate approvals between merges.
+    """
 
     async def _do_merge():
         async with AsyncMergeManager(
             token=ctx.token,  # pyright: ignore[reportArgumentType]
             merge_method=ctx.merge_method,
             max_retries=MAX_RETRIES,
-            concurrency=10,
+            concurrency=concurrency,
             fix_out_of_date=not ctx.no_fix,
             progress_tracker=ctx.progress_tracker,
             preview_mode=preview,
@@ -1029,8 +1041,12 @@ def _handle_repo_merge(
     if ctx.show_progress:
         ctx.progress_tracker = MergeProgressTracker(ctx.owner)
 
+    # Serialise merges for repo-scoped operations: all PRs target
+    # the same repository, so parallel approve+merge would race
+    # against GitHub's branch-protection propagation and cause
+    # spurious "branch protection" failures.
     merge_results = _run_parallel_merge(
-        ctx, all_prs_to_merge, preview=not ctx.no_confirm
+        ctx, all_prs_to_merge, preview=not ctx.no_confirm, concurrency=1
     )
 
     if not merge_results:
@@ -1137,7 +1153,7 @@ def _execute_repo_confirmed_merge(
     )
 
     real_results = _run_parallel_merge(
-        ctx, mergeable_prs, preview=False
+        ctx, mergeable_prs, preview=False, concurrency=1
     )
 
     final_merged = sum(
