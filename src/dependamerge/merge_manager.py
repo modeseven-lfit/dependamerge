@@ -1541,10 +1541,11 @@ class AsyncMergeManager:
             )
             return False
 
-        # 4. Poll for the status to appear (up to ~30 seconds)
-        # Keep this short to avoid stalling merge workers — if pre-commit.ci
-        # hasn't responded yet, the next run will pick it up.
-        max_polls = 6  # 6 × 5s = 30s
+        # 4. Poll for the status to appear (up to ~5 minutes)
+        # pre-commit.ci can take up to five minutes to run and report back,
+        # so we need a generous timeout to avoid prematurely marking PRs as
+        # unmergeable when the check simply hasn't finished yet.
+        max_polls = 60  # 60 × 5s = 300s
         for attempt in range(max_polls):
             await asyncio.sleep(5.0)
             try:
