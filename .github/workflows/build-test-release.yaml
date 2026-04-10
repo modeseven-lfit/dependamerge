@@ -14,6 +14,10 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   repository-metadata:
     name: "Repository Metadata"
@@ -249,8 +253,9 @@ jobs:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
           output-format: "table"
           output-file: "grype-results.txt"
-          # Differs from build-test.yaml, which requires fixes to be applied
-          # Deliberately set to not block releases if/when tags are pushed
+          # This scan produces human-readable output only; fail-build
+          # is false because the SARIF scan above captures the pass/fail
+          # outcome, checked by the final "Check Grype scan results" step
           fail-build: "false"
 
       - name: "Upload Grype scan results"
@@ -285,6 +290,10 @@ jobs:
               cat grype-results.txt
             fi
 
+      # Fails the job if Grype found vulnerabilities, unless the
+      # NO_BLOCK_AUDIT_FAIL repository variable is set to 'true'.
+      # This allows releases to proceed when blocked by newly
+      # discovered CVEs in transitive dependencies.
       - name: "Check Grype scan results"
         if: >-
           steps.grype-sarif.outcome == 'failure'
@@ -297,6 +306,11 @@ jobs:
               "grype-scan-results artifact for details"
             exit 1
 
+  # NOTE: PyPI (test and production) will reject duplicate uploads for the
+  # same package version. This means the publishing steps below are NOT
+  # idempotent and will fail on workflow re-runs once a version has been
+  # published. This is expected behaviour and by design; it prevents the
+  # release workflow as a whole from being re-runnable after success.
   test-pypi:
     name: 'Test PyPI Publishing'
     runs-on: 'ubuntu-latest'
@@ -355,6 +369,12 @@ jobs:
 
   # Attach build artefacts prior to release promotion
   # This enables the GitHub immutable releases feature
+  #
+  # NOTE: This job does NOT need an isDraft guard for full workflow
+  # re-runs. If the workflow is re-run after a release has already been
+  # promoted (immutable), the earlier PyPI publishing steps will fail
+  # first (PyPI rejects duplicate uploads), so this job will never be
+  # reached. Individual job re-runs are not supported for this workflow.
   attach-artefacts:
     name: 'Attach Artefacts to Release'
     runs-on: 'ubuntu-latest'
