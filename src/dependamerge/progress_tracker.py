@@ -374,25 +374,56 @@ class MergeProgressTracker(ProgressTracker):
         self.is_close_operation = is_close_operation
         self._custom_label = operation_label
         self._custom_icon = operation_icon
+        # PR-level progress (used for repo-scoped operations)
+        self.total_prs = 0
+        self.completed_prs = 0
 
     def found_similar_pr(self, count: int = 1) -> None:
         """Update count of similar PRs found."""
         self.similar_prs_found += count
         self._refresh_display()
 
+    def set_total_prs(self, total: int) -> None:
+        """Set the total number of PRs to process.
+
+        When set, the progress display switches from repo-level
+        to PR-level progress (e.g. ``3/9 PRs, 33%``).
+        """
+        self.total_prs = total
+        self._refresh_display()
+
     def merge_success(self) -> None:
         """Record a successful merge."""
         self.prs_merged += 1
+        if self.total_prs > 0:
+            self.completed_prs += 1
         self._refresh_display()
 
     def merge_failure(self) -> None:
         """Record a failed merge."""
         self.prs_failed += 1
+        if self.total_prs > 0:
+            self.completed_prs += 1
         self._refresh_display()
 
     def increment_closed(self) -> None:
         """Record a successful close."""
         self.prs_closed += 1
+        if self.total_prs > 0:
+            self.completed_prs += 1
+        self._refresh_display()
+
+    def pr_completed(self) -> None:
+        """Record a PR as processed without changing status counters.
+
+        Use this for BLOCKED/SKIPPED outcomes that bypass
+        ``merge_success()`` and ``merge_failure()``.  Those
+        methods already increment ``completed_prs``; this one
+        exists solely to keep the progress percentage accurate
+        for terminal states that neither method covers.
+        """
+        if self.total_prs > 0:
+            self.completed_prs += 1
         self._refresh_display()
 
     def _generate_display_text(self) -> Any:
@@ -411,8 +442,22 @@ class MergeProgressTracker(ProgressTracker):
         )
         label = self._custom_label or default_label
 
-        # Main progress line for merge/close operations
-        if self.total_repositories > 0:
+        # Main progress line for merge/close operations.
+        # PR-level progress takes priority over repo-level progress
+        # so repo-scoped merges show "3/9 PRs" instead of "0/1 repos".
+        if self.total_prs > 0:
+            progress_pct = (self.completed_prs / self.total_prs) * 100
+            default_icon = "🚪" if self.is_close_operation else "🔀"
+            icon = self._custom_icon or default_icon
+            text.append(f"{icon} {label} in ", style="bold blue")
+            text.append(f"{self.organization} ", style="bold cyan")
+            text.append(
+                f"({self.completed_prs}/{self.total_prs} PRs, ",
+                style="dim",
+            )
+            text.append(f"{progress_pct:.0f}%", style="bold green")
+            text.append(")", style="dim")
+        elif self.total_repositories > 0:
             progress_pct = (self.completed_repositories / self.total_repositories) * 100
             default_icon = "🚪" if self.is_close_operation else "🔀"
             icon = self._custom_icon or default_icon
@@ -482,6 +527,8 @@ class MergeProgressTracker(ProgressTracker):
                 "prs_merged": self.prs_merged,
                 "prs_failed": self.prs_failed,
                 "prs_closed": self.prs_closed,
+                "total_prs": self.total_prs,
+                "completed_prs": self.completed_prs,
             }
         )
         return base
@@ -519,6 +566,8 @@ class DummyProgressTracker(ProgressTracker):
         self.is_close_operation = False
         self._custom_label: str | None = None
         self._custom_icon: str | None = None
+        self.total_prs = 0
+        self.completed_prs = 0
 
     def start(self) -> None:
         pass
@@ -548,6 +597,12 @@ class DummyProgressTracker(ProgressTracker):
         pass
 
     def clear_rate_limited(self) -> None:
+        pass
+
+    def set_total_prs(self, total: int) -> None:
+        pass
+
+    def pr_completed(self) -> None:
         pass
 
     def found_similar_pr(self, count: int = 1) -> None:

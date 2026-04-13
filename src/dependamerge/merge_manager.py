@@ -248,7 +248,18 @@ class AsyncMergeManager:
     ) -> MergeResult:
         """Merge a single PR with concurrency control."""
         async with self._merge_semaphore:
-            return await self._merge_single_pr(pr_info)
+            result = await self._merge_single_pr(pr_info)
+            # merge_success() and merge_failure() already increment
+            # completed_prs for MERGED/FAILED outcomes.  Catch the
+            # remaining terminal states here so PR-level progress
+            # reaches 100% even when some PRs are blocked or skipped.
+            if (
+                self.progress_tracker
+                and result.status
+                in (MergeStatus.BLOCKED, MergeStatus.SKIPPED)
+            ):
+                self.progress_tracker.pr_completed()
+            return result
 
     async def _detect_github2gerrit(
         self,

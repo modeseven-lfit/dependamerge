@@ -1073,7 +1073,7 @@ def _handle_repo_merge(
             operation_label="Merging PRs",
             operation_icon="🔀",
         )
-        ctx.progress_tracker.update_total_repositories(1)
+        ctx.progress_tracker.set_total_prs(len(all_prs_to_merge))
         ctx.progress_tracker.start()
 
     try:
@@ -1190,7 +1190,7 @@ def _execute_repo_confirmed_merge(
             operation_label="Merging PRs",
             operation_icon="🔀",
         )
-        ctx.progress_tracker.update_total_repositories(1)
+        ctx.progress_tracker.set_total_prs(len(mergeable_prs))
         ctx.progress_tracker.start()
 
     try:
