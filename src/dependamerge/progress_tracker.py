@@ -346,13 +346,34 @@ class ProgressTracker:
 class MergeProgressTracker(ProgressTracker):
     """Extended progress tracker with merge-specific metrics."""
 
-    def __init__(self, organization: str, is_close_operation: bool = False):
+    def __init__(
+        self,
+        organization: str,
+        is_close_operation: bool = False,
+        operation_label: str | None = None,
+        operation_icon: str | None = None,
+    ):
+        """Initialize merge progress tracker.
+
+        Args:
+            organization: Name of the GitHub organization or owner.
+            is_close_operation: Whether this tracks a close operation.
+            operation_label: Custom heading label for the progress
+                display.  When ``None``, defaults to
+                ``"Searching for similar PRs"`` (merge) or
+                ``"Closing PRs"`` (close).
+            operation_icon: Custom emoji icon for the heading.  When
+                ``None``, defaults to ``"🔀"`` / ``"🔍"`` (merge) or
+                ``"🚪"`` (close) depending on context.
+        """
         super().__init__(organization, show_pr_stats=True)
         self.similar_prs_found = 0
         self.prs_merged = 0
         self.prs_failed = 0
         self.prs_closed = 0
         self.is_close_operation = is_close_operation
+        self._custom_label = operation_label
+        self._custom_icon = operation_icon
 
     def found_similar_pr(self, count: int = 1) -> None:
         """Update count of similar PRs found."""
@@ -381,16 +402,21 @@ class MergeProgressTracker(ProgressTracker):
 
         text = Text()
 
+        # Resolve label and icon — use custom values when provided,
+        # otherwise fall back to the default close/merge text.
+        default_label = (
+            "Closing PRs"
+            if self.is_close_operation
+            else "Searching for similar PRs"
+        )
+        label = self._custom_label or default_label
+
         # Main progress line for merge/close operations
         if self.total_repositories > 0:
             progress_pct = (self.completed_repositories / self.total_repositories) * 100
-            operation_icon = "🚪" if self.is_close_operation else "🔀"
-            operation_text = (
-                "Searching for similar PRs"
-                if not self.is_close_operation
-                else "Closing PRs"
-            )
-            text.append(f"{operation_icon} {operation_text} in ", style="bold blue")
+            default_icon = "🚪" if self.is_close_operation else "🔀"
+            icon = self._custom_icon or default_icon
+            text.append(f"{icon} {label} in ", style="bold blue")
             text.append(f"{self.organization} ", style="bold cyan")
             text.append(
                 f"({self.completed_repositories}/{self.total_repositories} repos, ",
@@ -399,13 +425,9 @@ class MergeProgressTracker(ProgressTracker):
             text.append(f"{progress_pct:.0f}%", style="bold green")
             text.append(")", style="dim")
         else:
-            operation_icon = "🚪" if self.is_close_operation else "🔍"
-            operation_text = (
-                "Closing PRs"
-                if self.is_close_operation
-                else "Searching for similar PRs"
-            )
-            text.append(f"{operation_icon} {operation_text} in ", style="bold blue")
+            default_icon = "🚪" if self.is_close_operation else "🔍"
+            icon = self._custom_icon or default_icon
+            text.append(f"{icon} {label} in ", style="bold blue")
             text.append(f"{self.organization} ", style="bold cyan")
 
         # Current operation
@@ -495,6 +517,8 @@ class DummyProgressTracker(ProgressTracker):
         self.prs_failed = 0
         self.prs_closed = 0
         self.is_close_operation = False
+        self._custom_label: str | None = None
+        self._custom_icon: str | None = None
 
     def start(self) -> None:
         pass

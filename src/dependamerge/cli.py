@@ -943,7 +943,11 @@ def _handle_repo_merge(
 
     # --- Progress tracker ---
     if ctx.show_progress:
-        ctx.progress_tracker = MergeProgressTracker(ctx.owner)
+        ctx.progress_tracker = MergeProgressTracker(
+            ctx.owner,
+            operation_label="Fetching open PRs",
+            operation_icon="🔍",
+        )
         ctx.progress_tracker.update_total_repositories(1)
         ctx.progress_tracker.start()
 
@@ -1064,7 +1068,11 @@ def _handle_repo_merge(
 
     # --- Preview / merge using existing infrastructure ---
     if ctx.show_progress:
-        ctx.progress_tracker = MergeProgressTracker(ctx.owner)
+        ctx.progress_tracker = MergeProgressTracker(
+            ctx.owner,
+            operation_label="Merging PRs",
+            operation_icon="🔀",
+        )
         ctx.progress_tracker.update_total_repositories(1)
         ctx.progress_tracker.start()
 
@@ -1177,7 +1185,11 @@ def _execute_repo_confirmed_merge(
     )
 
     if ctx.show_progress:
-        ctx.progress_tracker = MergeProgressTracker(ctx.owner)
+        ctx.progress_tracker = MergeProgressTracker(
+            ctx.owner,
+            operation_label="Merging PRs",
+            operation_icon="🔀",
+        )
         ctx.progress_tracker.update_total_repositories(1)
         ctx.progress_tracker.start()
 
