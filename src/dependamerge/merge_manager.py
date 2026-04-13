@@ -116,6 +116,12 @@ class AsyncMergeManager:
         # Track merge methods per repository
         self._pr_merge_methods: dict[str, str] = {}
 
+        # Cache for organization-level settings to avoid repeated API calls
+        # Key: org name, Value: org settings dict (or None on failure)
+        self._org_settings_cache: dict[str, dict[str, Any] | None] = {}
+        self._org_settings_locks: dict[str, asyncio.Lock] = {}
+        self._org_settings_locks_lock = asyncio.Lock()
+
         # Track last merge exception per PR for better error reporting
         self._last_merge_exception: dict[str, Exception] = {}
 
@@ -242,7 +248,18 @@ class AsyncMergeManager:
     ) -> MergeResult:
         """Merge a single PR with concurrency control."""
         async with self._merge_semaphore:
-            return await self._merge_single_pr(pr_info)
+            result = await self._merge_single_pr(pr_info)
+            # merge_success() and merge_failure() already increment
+            # completed_prs for MERGED/FAILED outcomes.  Catch the
+            # remaining terminal states here so PR-level progress
+            # reaches 100% even when some PRs are blocked or skipped.
+            if (
+                self.progress_tracker
+                and result.status
+                in (MergeStatus.BLOCKED, MergeStatus.SKIPPED)
+            ):
+                self.progress_tracker.pr_completed()
+            return result
 
     async def _detect_github2gerrit(
         self,
@@ -1537,10 +1554,11 @@ class AsyncMergeManager:
             )
             return False
 
-        # 4. Poll for the status to appear (up to ~30 seconds)
-        # Keep this short to avoid stalling merge workers — if pre-commit.ci
-        # hasn't responded yet, the next run will pick it up.
-        max_polls = 6  # 6 × 5s = 30s
+        # 4. Poll for the status to appear (up to ~5 minutes)
+        # pre-commit.ci can take up to five minutes to run and report back,
+        # so we need a generous timeout to avoid prematurely marking PRs as
+        # unmergeable when the check simply hasn't finished yet.
+        max_polls = 60  # 60 × 5s = 300s
         for attempt in range(max_polls):
             await asyncio.sleep(5.0)
             try:
@@ -2464,6 +2482,62 @@ class AsyncMergeManager:
         # For other failure types, don't retry
         return False
 
+    async def _get_org_settings(self, owner: str) -> dict[str, Any] | None:
+        """
+        Get organization-level settings, with caching.
+
+        Organization settings (e.g. web_commit_signoff_required) don't change
+        between PRs in the same org, so we cache the result for the lifetime
+        of the merge session.
+
+        Args:
+            owner: Organization/owner name
+
+        Returns:
+            Organization settings dict, or None if the lookup failed
+        """
+        # Fast path: no lock needed if already cached
+        if owner in self._org_settings_cache:
+            return self._org_settings_cache[owner]
+
+        # Acquire a per-owner lock so concurrent lookups for the same
+        # org are serialised, but lookups for *different* orgs proceed
+        # in parallel without blocking each other.
+        async with self._org_settings_locks_lock:
+            if owner not in self._org_settings_locks:
+                self._org_settings_locks[owner] = asyncio.Lock()
+            owner_lock = self._org_settings_locks[owner]
+
+        async with owner_lock:
+            # Re-check after acquiring the per-owner lock (another
+            # task may have populated the cache while we waited).
+            if owner in self._org_settings_cache:
+                return self._org_settings_cache[owner]
+
+            if not self._github_client:
+                return None
+
+            try:
+                org_data = await self._github_client.get(f"/orgs/{owner}")
+                if isinstance(org_data, dict):
+                    self._org_settings_cache[owner] = org_data
+                    # Log org-level details once, not per-PR
+                    web_commit_signoff = org_data.get(
+                        "web_commit_signoff_required", False
+                    )
+                    if web_commit_signoff:
+                        self.log.debug(
+                            f"Organization {owner} requires commit signoff"
+                        )
+                    return org_data
+                else:
+                    self._org_settings_cache[owner] = None
+                    return None
+            except Exception as e:
+                self.log.debug(f"Could not check organization settings for {owner}: {e}")
+                self._org_settings_cache[owner] = None
+                return None
+
     async def _test_merge_capability(
         self, owner: str, repo: str, pr_number: int, merge_method: str
     ) -> tuple[bool, str]:
@@ -2486,21 +2560,8 @@ class AsyncMergeManager:
             return False, "GitHub client not initialized"
 
         try:
-            # Check organization-level restrictions that may not be visible in branch protection
-            try:
-                org_data = await self._github_client.get(f"/orgs/{owner}")
-                if isinstance(org_data, dict):
-                    # Some organizations have additional restrictions
-                    web_commit_signoff = org_data.get(
-                        "web_commit_signoff_required", False
-                    )
-                    if web_commit_signoff:
-                        self.log.debug(f"Organization {owner} requires commit signoff")
-            except Exception as org_check_error:
-                # Organization check failed, continue with other checks
-                self.log.debug(
-                    f"Could not check organization settings: {org_check_error}"
-                )
+            # Check organization-level restrictions (cached per org)
+            await self._get_org_settings(owner)
 
             # Note: Removed DCO signoff check as web_commit_signoff_required only affects
             # web-based commits, not PR merges. DCO enforcement for PRs is handled by

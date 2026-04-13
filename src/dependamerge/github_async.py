@@ -239,6 +239,9 @@ class GitHubAsync:
         self._adaptive_delay = 0.0
         self._last_adaptive_update: float | None = None
 
+        # Cache for the authenticated user's login (never changes during a session)
+        self._authenticated_user_login: str | None = None
+
         mounts = None
         if proxies:
             mounts = {}
@@ -1258,19 +1261,23 @@ class GitHubAsync:
             try:
                 # For organization repos, check if user has bypass permissions
                 # This requires checking the user's role/permissions
-                user_data = await self.get("/user")
-                if isinstance(user_data, dict):
-                    username = user_data.get("login")
-                    if username:
-                        # Check collaborator permissions
-                        collab_data = await self.get(
-                            f"/repos/{owner}/{repo}/collaborators/{username}/permission"
-                        )
-                        if isinstance(collab_data, dict):
-                            permission_level = collab_data.get("permission")
-                            # admin permission can bypass
-                            if permission_level == "admin":
-                                return True, "User has admin collaborator permissions"
+                # Use cached login to avoid repeated /user calls
+                if self._authenticated_user_login is None:
+                    user_data = await self.get("/user")
+                    if isinstance(user_data, dict):
+                        self._authenticated_user_login = user_data.get("login")
+
+                username = self._authenticated_user_login
+                if username:
+                    # Check collaborator permissions
+                    collab_data = await self.get(
+                        f"/repos/{owner}/{repo}/collaborators/{username}/permission"
+                    )
+                    if isinstance(collab_data, dict):
+                        permission_level = collab_data.get("permission")
+                        # admin permission can bypass
+                        if permission_level == "admin":
+                            return True, "User has admin collaborator permissions"
             except Exception as e:
                 # If we can't check detailed permissions, continue with basic check
                 self.log.debug(
@@ -1357,58 +1364,96 @@ class GitHubAsync:
 
             try:
                 # Perform a lightweight check for each operation
-                if operation == "approve" and owner and repo:
-                    # Check if we can access PR reviews endpoint
-                    # Use a non-existent PR number to test permission without side effects
-                    try:
-                        await self.get(f"/repos/{owner}/{repo}/pulls/999999/reviews")
-                    except Exception as e:
-                        if "404" not in str(e):  # 404 is fine, means we have permission
-                            raise
-                    result["has_permission"] = True
+                if operation in ("approve", "merge", "close", "update_branch") and owner and repo:
+                    # Use the collaborator permission endpoint to verify
+                    # the token has write access to this specific repo.
+                    #
+                    # The previous approach (GET /repos/{owner}/{repo} and
+                    # inspecting permissions.push) is unreliable for
+                    # fine-grained PATs: GitHub returns the *user's*
+                    # org-level permissions regardless of token scope,
+                    # producing false positives when the token is scoped
+                    # to a different org.
+                    #
+                    # The collaborator endpoint correctly returns 403
+                    # ("Resource not accessible by personal access token")
+                    # when the token doesn't cover the target repo.
 
-                elif operation == "merge" and owner and repo:
-                    # Check repository permissions
-                    repo_data = await self.get(f"/repos/{owner}/{repo}")
-                    if isinstance(repo_data, dict):
-                        permissions = repo_data.get("permissions", {})
-                        if permissions.get("push") or permissions.get("admin"):
-                            result["has_permission"] = True
-                        else:
-                            result["error"] = "Token lacks push/write permissions"
-                            perms = OPERATION_PERMISSIONS.get("merge", {})
-                            result["guidance"] = {
-                                "classic": perms.get("classic"),
-                                "fine_grained": perms.get("fine_grained"),
-                            }
+                    # Resolve authenticated username (cached after first call)
+                    if self._authenticated_user_login is None:
+                        user_data = await self.get("/user")
+                        if isinstance(user_data, dict):
+                            self._authenticated_user_login = user_data.get("login")
 
-                elif operation == "close" and owner and repo:
-                    # Similar to approve - check PR access
-                    try:
-                        await self.get(
-                            f"/repos/{owner}/{repo}/pulls?state=closed&per_page=1"
+                    username = self._authenticated_user_login
+                    if not username:
+                        result["error"] = "Could not determine authenticated user"
+                    else:
+                        collab_data = await self.get(
+                            f"/repos/{owner}/{repo}/collaborators/{username}/permission"
                         )
-                    except Exception as e:
-                        if "404" not in str(e):
-                            raise
-                    result["has_permission"] = True
-
-                elif operation == "update_branch" and owner and repo:
-                    # Check repository write permissions
-                    repo_data = await self.get(f"/repos/{owner}/{repo}")
-                    if isinstance(repo_data, dict):
-                        permissions = repo_data.get("permissions", {})
-                        if permissions.get("push") or permissions.get("admin"):
-                            result["has_permission"] = True
+                        if isinstance(collab_data, dict):
+                            perm_level = collab_data.get("permission", "none")
+                            # write, maintain, or admin is required for approve/merge/close/update
+                            if perm_level in ("write", "maintain", "admin"):
+                                result["has_permission"] = True
+                            else:
+                                result["error"] = (
+                                    f"Token has '{perm_level}' access to "
+                                    f"{owner}/{repo} — write, maintain, or admin is required"
+                                )
+                                perms = OPERATION_PERMISSIONS.get(operation, {})
+                                result["guidance"] = {
+                                    "classic": perms.get("classic"),
+                                    "fine_grained": perms.get("fine_grained"),
+                                }
                         else:
                             result["error"] = (
-                                "Token lacks push/write permissions for branch updates"
+                                "Could not determine collaborator permissions"
                             )
-                            perms = OPERATION_PERMISSIONS.get("update_branch", {})
-                            result["guidance"] = {
-                                "classic": perms.get("classic"),
-                                "fine_grained": perms.get("fine_grained"),
-                            }
+
+                elif operation == "branch_protection" and owner and repo:
+                    # Verify Administration: Read permission by probing
+                    # the branch protection endpoint.  A token with this
+                    # permission receives either 200 (rules exist) or
+                    # 404 "Branch not protected"; without it GitHub
+                    # returns 403 "Resource not accessible".
+                    #
+                    # The repo metadata fetch is separated from the
+                    # branch-protection probe so that a 404 from
+                    # GET /repos/{owner}/{repo} (repo doesn't exist or
+                    # token can't see it) is NOT silently treated as
+                    # success.
+                    default_branch = "main"
+                    try:
+                        repo_data = await self.get(
+                            f"/repos/{owner}/{repo}"
+                        )
+                        if isinstance(repo_data, dict):
+                            default_branch = repo_data.get(
+                                "default_branch", "main"
+                            )
+                    except Exception:
+                        # Repo metadata fetch failed — token may lack
+                        # access.  Let the error propagate to the outer
+                        # handler which will surface it as a permission
+                        # error.  Do NOT fall through to treat this as
+                        # success.
+                        raise
+
+                    try:
+                        await self.get(
+                            f"/repos/{owner}/{repo}/branches/"
+                            f"{default_branch}/protection"
+                        )
+                        result["has_permission"] = True
+                    except Exception as e:
+                        if "404" in str(e):
+                            # 404 = branch exists but has no protection
+                            # rules — the token still has the permission.
+                            result["has_permission"] = True
+                        else:
+                            raise
 
                 elif operation == "list_repos":
                     # Check organization access

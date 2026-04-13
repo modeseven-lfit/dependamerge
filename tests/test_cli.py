@@ -140,7 +140,6 @@ class TestCLI:
 
         assert result.exit_code == 1
         assert "❌ Invalid URL:" in result.stdout
-        assert "Cannot determine platform" in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")
     def test_merge_command_non_automation_pr(self, mock_client_class):

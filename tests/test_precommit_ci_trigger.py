@@ -359,18 +359,18 @@ class TestPollingBehavior:
 
         pending = {"statuses": [{"context": "pre-commit.ci - pr", "state": "pending"}]}
 
-        # step 2 + step 3 + 6 poll iterations (max_polls = 6)
+        # step 2 + step 3 + 60 poll iterations (max_polls = 60)
         client.get.side_effect = [
             {"statuses": []},
             [],
-        ] + [pending] * 6
+        ] + [pending] * 60
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             result = await mgr._trigger_stale_precommit_ci(pr)
 
         assert result is False
         # Should have slept once per poll
-        assert mock_sleep.call_count == 6
+        assert mock_sleep.call_count == 60
 
     @pytest.mark.asyncio
     async def test_polling_handles_api_errors_gracefully(self):

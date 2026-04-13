@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 import typer
@@ -62,7 +63,13 @@ from .pr_comparator import PRComparator
 from .progress_tracker import MergeProgressTracker, ProgressTracker
 from .resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
 from .system_utils import get_default_workers
-from .url_parser import ParsedUrl, UrlParseError, parse_change_url
+from .url_parser import (
+    ParsedRepoUrl,
+    ParsedUrl,
+    UrlParseError,
+    parse_change_url,
+    parse_repo_url,
+)
 
 # Constants
 MAX_RETRIES = 2
@@ -321,6 +328,7 @@ class _MergeContext:
     netrc_file: Path | None
     netrc_optional: bool
     github2gerrit_mode: str
+    include_human_prs: bool = False
 
     # Derived / mutable state
     github_client: GitHubClient | None = None
@@ -491,7 +499,7 @@ def _check_merge_permissions(ctx: _MergeContext) -> None:
 
     async def _check() -> dict[str, dict[str, Any]]:
         async with GitHubAsync(token=ctx.token) as client:
-            operations = ["approve", "merge"]
+            operations = ["approve", "merge", "branch_protection"]
             if not ctx.no_fix:
                 operations.append("update_branch")
             return await client.check_token_permissions(
@@ -500,11 +508,27 @@ def _check_merge_permissions(ctx: _MergeContext) -> None:
 
     try:
         perm_results = asyncio.run(_check())
+        # Separate blocking failures from advisory warnings.
+        # branch_protection (Administration: Read) is advisory — the
+        # merge flow tolerates missing visibility and the token can
+        # still approve/merge successfully without it.
+        _ADVISORY_OPS = {"branch_protection"}
         missing_perms = [
             op
             for op, result in perm_results.items()
-            if not result["has_permission"]
+            if not result["has_permission"] and op not in _ADVISORY_OPS
         ]
+        advisory_perms = [
+            op
+            for op, result in perm_results.items()
+            if not result["has_permission"] and op in _ADVISORY_OPS
+        ]
+        if advisory_perms:
+            for op in advisory_perms:
+                result = perm_results[op]
+                console.print(
+                    f"⚠️  {op}: {result['error']} (non-blocking)"
+                )
         if missing_perms:
             console.print("\n❌ Token Permission Check Failed:\n")
             for op in missing_perms:
@@ -688,15 +712,27 @@ def _run_parallel_merge(
         tuple[PullRequestInfo, ComparisonResult | None]
     ],
     preview: bool,
+    concurrency: int = 10,
 ) -> list[MergeResult]:
-    """Execute a parallel merge (preview or real) and return results."""
+    """Execute a parallel merge (preview or real) and return results.
+
+    Args:
+        ctx: Shared merge context.
+        prs_to_merge: PRs to process.
+        preview: If True, run in preview mode without side effects.
+        concurrency: Maximum number of concurrent merge workers.
+            For org-wide merges (PRs spread across repos) the default
+            of 10 is fine.  For repo-scoped merges (all PRs in the
+            same repo) use 1 to serialise operations and give GitHub
+            time to propagate approvals between merges.
+    """
 
     async def _do_merge():
         async with AsyncMergeManager(
             token=ctx.token,  # pyright: ignore[reportArgumentType]
             merge_method=ctx.merge_method,
             max_retries=MAX_RETRIES,
-            concurrency=10,
+            concurrency=concurrency,
             fix_out_of_date=not ctx.no_fix,
             progress_tracker=ctx.progress_tracker,
             preview_mode=preview,
@@ -861,6 +897,330 @@ def _display_merge_results(
             f"📈 Final Results: {merged_count} merged, "
             f"{failed_count} failed"
         )
+
+
+def _handle_repo_merge(
+    parsed_repo: ParsedRepoUrl,
+    ctx: _MergeContext,
+) -> None:
+    """Handle merge operation for a repository-scoped URL.
+
+    Instead of scanning an entire org for similar PRs, this fetches all
+    open PRs in a single repository and merges the automation ones (or
+    all of them when --include-human-prs is given).
+
+    Args:
+        parsed_repo: Parsed repository URL with owner and repo.
+        ctx: Shared merge context populated with CLI parameters.
+    """
+    from .github_service import GitHubService
+    from .url_parser import _host_matches
+
+    # --- Guard: repo-merge only supports github.com for now ---
+    if not _host_matches(parsed_repo.host, "github.com"):
+        console.print(
+            "❌ Repository-scoped merge is currently only supported "
+            f"for github.com (got host: {parsed_repo.host}).\n"
+            "   GitHub Enterprise support requires API base URL "
+            "configuration — use a direct PR URL instead."
+        )
+        raise typer.Exit(code=1)
+
+    # --- Initialise GitHub client & token ---
+    ctx.github_client = GitHubClient(ctx.token)
+    assert ctx.github_client.token is not None
+    ctx.token = ctx.github_client.token
+    ctx.owner = parsed_repo.owner
+    ctx.repo_name = parsed_repo.repo
+
+    console.print(
+        f"🔍 Repository mode: fetching open PRs in "
+        f"{parsed_repo.project}..."
+    )
+
+    # --- Token permission check (reuse existing helper) ---
+    _check_merge_permissions(ctx)
+
+    # --- Progress tracker ---
+    if ctx.show_progress:
+        ctx.progress_tracker = MergeProgressTracker(
+            ctx.owner,
+            operation_label="Fetching open PRs",
+            operation_icon="🔍",
+        )
+        ctx.progress_tracker.update_total_repositories(1)
+        ctx.progress_tracker.start()
+
+    # --- Fetch open PRs for the repository ---
+    only_automation = not ctx.include_human_prs
+
+    async def _fetch_prs() -> list[PullRequestInfo]:
+        svc = GitHubService(
+            token=ctx.token,
+            progress_tracker=ctx.progress_tracker,
+        )
+        try:
+            return await svc.fetch_repo_open_prs(
+                ctx.owner,
+                ctx.repo_name,
+                only_automation=only_automation,
+            )
+        finally:
+            await svc.close()
+
+    try:
+        repo_prs = asyncio.run(_fetch_prs())
+    except Exception:
+        if ctx.progress_tracker:
+            ctx.progress_tracker.stop()
+        raise
+
+    if ctx.progress_tracker:
+        ctx.progress_tracker.stop()
+
+    if not repo_prs:
+        label = "automation " if only_automation else ""
+        console.print(
+            f"❌ No open {label}PRs found in "
+            f"{parsed_repo.project}"
+        )
+        return
+
+    # --- Classify PRs as automation vs human ---
+    # Use AUTOMATION_TOOLS substring matching (consistent with
+    # GitHubService.fetch_repo_open_prs and _is_automation_author).
+    # GraphQL returns authors without the "[bot]" suffix (e.g.
+    # "dependabot" not "dependabot[bot]"), so the exact-match
+    # GitHubClient.is_automation_author() would misclassify them.
+    def _is_auto(author: str | None) -> bool:
+        author_lower = (author or "").lower()
+        return any(tool in author_lower for tool in AUTOMATION_TOOLS)
+
+    automation_prs: list[PullRequestInfo] = []
+    human_prs: list[PullRequestInfo] = []
+    for pr in repo_prs:
+        if _is_auto(pr.author):
+            automation_prs.append(pr)
+        else:
+            human_prs.append(pr)
+
+    console.print(
+        f"\n📊 Found {len(repo_prs)} open PR(s) in "
+        f"{parsed_repo.project}"
+    )
+    if automation_prs:
+        console.print(
+            f"   🤖 Automation PRs: {len(automation_prs)}"
+        )
+    if human_prs:
+        console.print(
+            f"   👤 Human PRs: {len(human_prs)}"
+        )
+
+    # List PRs that will be processed
+    for pr in repo_prs:
+        icon = "🤖" if _is_auto(pr.author) else "👤"
+        console.print(
+            f"  {icon} #{pr.number} {pr.title} "
+            f"(by {pr.author})"
+        )
+
+    # --- Human PR confirmation gate ---
+    # Only prompt when human PRs are actually in scope, not merely
+    # because --include-human-prs was supplied.
+    needs_human_confirm = bool(human_prs) and not ctx.no_confirm
+    if needs_human_confirm:
+        console.print(
+            "\n⚠️  Human-authored PRs are included in this "
+            "merge operation."
+        )
+        console.print(
+            "   Review the list above carefully before "
+            "proceeding."
+        )
+        try:
+            user_input = typer.prompt(
+                "Type 'yes' to include human PRs, "
+                "or press Enter to skip them",
+                default="",
+                show_default=False,
+            ).strip().lower()
+            if user_input != "yes":
+                console.print(
+                    "ℹ️  Excluding human PRs from merge."
+                )
+                # Remove human PRs from the working set
+                repo_prs = automation_prs
+                human_prs = []
+                if not repo_prs:
+                    console.print(
+                        "❌ No automation PRs remain to merge."
+                    )
+                    return
+        except (KeyboardInterrupt, EOFError, typer.Abort):
+            console.print("\n❌ Merge cancelled by user.")
+            return
+
+    # --- Build the merge list (ComparisonResult is None for repo mode) ---
+    all_prs_to_merge: list[
+        tuple[PullRequestInfo, ComparisonResult | None]
+    ] = [(pr, None) for pr in repo_prs]
+
+    # --- Preview / merge using existing infrastructure ---
+    if ctx.show_progress:
+        ctx.progress_tracker = MergeProgressTracker(
+            ctx.owner,
+            operation_label="Merging PRs",
+            operation_icon="🔀",
+        )
+        ctx.progress_tracker.set_total_prs(len(all_prs_to_merge))
+        ctx.progress_tracker.start()
+
+    try:
+        # Serialise merges for repo-scoped operations: all PRs target
+        # the same repository, so parallel approve+merge would race
+        # against GitHub's branch-protection propagation and cause
+        # spurious "branch protection" failures.
+        merge_results = _run_parallel_merge(
+            ctx, all_prs_to_merge, preview=not ctx.no_confirm, concurrency=1
+        )
+    finally:
+        if ctx.show_progress and ctx.progress_tracker:
+            ctx.progress_tracker.stop()
+
+    if not merge_results:
+        console.print("❌ No PRs were processed")
+        return
+
+    merged_count = sum(
+        1 for r in merge_results
+        if r.status.value == "merged"
+    )
+
+    if not ctx.no_confirm:
+        # In preview mode, show what would happen, then prompt
+        # for confirmation via an override-style SHA.
+        _handle_repo_preview_confirmation(
+            ctx,
+            merge_results,
+            all_prs_to_merge,
+            merged_count,
+            len(merge_results),
+        )
+        return
+
+    _display_merge_results(merge_results, ctx.no_confirm)
+
+
+def _handle_repo_preview_confirmation(
+    ctx: _MergeContext,
+    merge_results: list[MergeResult],
+    all_prs_to_merge: list[
+        tuple[PullRequestInfo, ComparisonResult | None]
+    ],
+    merged_count: int,
+    total_to_merge: int,
+) -> None:
+    """Handle preview-then-confirm for repository-scoped merges.
+
+    Similar to _handle_preview_confirmation but does not require a
+    source PR for SHA generation — it uses the repository name instead.
+    """
+    console.print(f"\nMergeable {merged_count}/{total_to_merge} PRs")
+
+    if merged_count == 0:
+        console.print("\n💡 No PRs are mergeable at this time.")
+        return
+
+    # Generate a confirmation token from the repo context
+    combined = (
+        f"repo-merge:{ctx.owner}/{ctx.repo_name}:"
+        f"{merged_count}"
+    )
+    confirm_hash = hashlib.sha256(
+        combined.encode("utf-8")
+    ).hexdigest()[:16]
+
+    console.print()
+    console.print(
+        f"To proceed with merging enter: {confirm_hash}"
+    )
+
+    try:
+        user_input = typer.prompt(
+            "Enter the string above to continue "
+            "(or press Enter to cancel)",
+            default="",
+            show_default=False,
+        ).strip()
+
+        if user_input == confirm_hash:
+            _execute_repo_confirmed_merge(
+                ctx, merge_results, all_prs_to_merge
+            )
+        elif user_input == "":
+            console.print("❌ Merge cancelled by user.")
+        else:
+            console.print("❌ Invalid input. Merge cancelled.")
+    except (KeyboardInterrupt, EOFError, typer.Abort):
+        console.print("\n❌ Merge cancelled by user.")
+
+
+def _execute_repo_confirmed_merge(
+    ctx: _MergeContext,
+    preview_results: list[MergeResult],
+    all_prs_to_merge: list[
+        tuple[PullRequestInfo, ComparisonResult | None]
+    ],
+) -> None:
+    """Run the real merge after user confirmation (repo mode)."""
+    mergeable_prs = [
+        all_prs_to_merge[i]
+        for i, result in enumerate(preview_results)
+        if result.status.value == "merged"
+    ]
+    merged_count = len(mergeable_prs)
+    console.print(
+        f"\n🔨 Merging {merged_count} mergeable pull requests..."
+    )
+
+    if ctx.show_progress:
+        ctx.progress_tracker = MergeProgressTracker(
+            ctx.owner,
+            operation_label="Merging PRs",
+            operation_icon="🔀",
+        )
+        ctx.progress_tracker.set_total_prs(len(mergeable_prs))
+        ctx.progress_tracker.start()
+
+    try:
+        real_results = _run_parallel_merge(
+            ctx, mergeable_prs, preview=False, concurrency=1
+        )
+    finally:
+        if ctx.show_progress and ctx.progress_tracker:
+            ctx.progress_tracker.stop()
+
+    final_merged = sum(
+        1 for r in real_results if r.status.value == "merged"
+    )
+    final_failed = sum(
+        1 for r in real_results if r.status.value == "failed"
+    )
+    final_skipped = sum(
+        1 for r in real_results if r.status.value == "skipped"
+    )
+    final_blocked = sum(
+        1 for r in real_results if r.status.value == "blocked"
+    )
+    console.print(
+        f"\n🚀 Final Results: {final_merged} merged, "
+        f"{final_failed} failed"
+    )
+    if final_skipped > 0:
+        console.print(f"⏭️  Skipped {final_skipped} PRs")
+    if final_blocked > 0:
+        console.print(f"🛑 Blocked {final_blocked} PRs")
 
 
 def _handle_gerrit_merge(
@@ -1072,7 +1432,10 @@ def _handle_gerrit_merge(
 
 @app.command()
 def merge(
-    pr_url: str = typer.Argument(..., help="GitHub PR URL or Gerrit change URL"),
+    pr_url: str = typer.Argument(
+        ...,
+        help="GitHub PR URL, repository URL, or Gerrit change URL",
+    ),
     no_confirm: bool = typer.Option(
         False,
         "--no-confirm",
@@ -1154,16 +1517,21 @@ def merge(
         "--ignore-github2gerrit",
         help="Ignore GitHub2Gerrit comments and merge PRs in GitHub as normal",
     ),
+    include_human_prs: bool = typer.Option(
+        False,
+        "--include-human-prs",
+        help="Include human-authored PRs when merging a repository (prompts for confirmation when human PRs are found)",
+    ),
 ):
     """
     Bulk approve/merge pull requests or Gerrit changes.
 
-    Supports both GitHub PRs and Gerrit Code Review changes.
+    Supports GitHub PRs, GitHub repository URLs, and Gerrit Code Review changes.
 
     By default, runs in interactive mode showing what changes will apply,
     then prompts to proceed with merge. Use --no-confirm to merge immediately.
 
-    For GitHub PRs, this command will:
+    For GitHub PRs (single PR URL), this command will:
 
     1. Analyze the provided PR
 
@@ -1172,6 +1540,19 @@ def merge(
     3. Approve and merge matching PRs
 
     4. Automatically fix out-of-date branches (use --no-fix to disable)
+
+    For GitHub repository URLs, this command will:
+
+    1. Fetch all open PRs in the specified repository
+
+    2. Filter to automation PRs only (unless --include-human-prs is given)
+
+    3. Approve and merge matching PRs in bulk
+
+    Repository URL formats accepted:
+      https://github.com/owner/repo
+      https://github.com/owner/repo/
+      https://github.com/owner/repo/pulls
 
     For Gerrit changes, this command will:
 
@@ -1214,14 +1595,44 @@ def merge(
         verbose,
     )
 
-    # --- Parse URL and route to Gerrit if applicable ---
+    # --- Parse URL and route to the appropriate handler ---
+    # Try as a specific PR/change URL first
+    parsed_url: ParsedUrl | None = None
+    parsed_repo: ParsedRepoUrl | None = None
+    change_err: UrlParseError | None = None
     try:
         parsed_url = parse_change_url(pr_url)
     except UrlParseError as e:
-        console.print(f"❌ Invalid URL: {e}")
-        raise typer.Exit(1) from None
+        change_err = e
+        # Not a PR URL — try as a repository URL
+        try:
+            parsed_repo = parse_repo_url(pr_url)
+        except UrlParseError as repo_err:
+            # Show the most relevant error: if the URL targets a
+            # non-github.com host the original parse_change_url error
+            # gives host-appropriate guidance (e.g. Gerrit tips),
+            # whereas parse_repo_url only talks about github.com.
+            from .url_parser import _host_matches
 
-    if parsed_url.is_gerrit:
+            try:
+                # Prepend scheme if missing so urlparse can extract the
+                # hostname.  Without a scheme, schemeless URLs like
+                # "gerrit.example.org/..." are parsed as a path with no
+                # hostname, causing the wrong error to be shown.
+                _norm = pr_url
+                if not _norm.startswith(("http://", "https://")):
+                    _norm = "https://" + _norm
+                host = urlparse(_norm).hostname or ""
+            except Exception:
+                host = ""
+            if host and not _host_matches(host.lower(), "github.com"):
+                console.print(f"❌ Invalid URL: {change_err}")
+            else:
+                console.print(f"❌ Invalid URL: {repo_err}")
+            raise typer.Exit(1) from None
+
+    # --- Route: Gerrit change ---
+    if parsed_url is not None and parsed_url.is_gerrit:
         _handle_gerrit_merge(
             parsed_url=parsed_url,
             no_confirm=no_confirm,
@@ -1234,7 +1645,73 @@ def merge(
         )
         return
 
-    # --- GitHub merge flow ---
+    # --- Route: GitHub repository (bulk per-repo merge) ---
+    if parsed_repo is not None:
+        repo_ctx = _MergeContext(
+            pr_url=parsed_repo.original_url,
+            no_confirm=no_confirm,
+            similarity_threshold=similarity_threshold,
+            merge_method=merge_method,
+            token=token,
+            override=override,
+            no_fix=no_fix,
+            show_progress=show_progress,
+            debug_matching=debug_matching,
+            dismiss_copilot=dismiss_copilot,
+            force=force,
+            verbose=verbose,
+            no_netrc=no_netrc,
+            netrc_file=netrc_file,
+            netrc_optional=netrc_optional,
+            github2gerrit_mode=github2gerrit_mode,
+            include_human_prs=include_human_prs,
+        )
+        try:
+            _handle_repo_merge(parsed_repo, repo_ctx)
+        except DependamergeError as exc:
+            if repo_ctx.progress_tracker:
+                repo_ctx.progress_tracker.stop()
+            exc.display_and_exit()
+        except (KeyboardInterrupt, SystemExit):
+            if repo_ctx.progress_tracker:
+                repo_ctx.progress_tracker.stop()
+            raise
+        except typer.Exit:
+            if repo_ctx.progress_tracker:
+                repo_ctx.progress_tracker.stop()
+            raise
+        except (
+            GitError,
+            RateLimitError,
+            SecondaryRateLimitError,
+            GraphQLError,
+        ) as exc:
+            if repo_ctx.progress_tracker:
+                repo_ctx.progress_tracker.stop()
+            if isinstance(exc, GitError):
+                converted_error = convert_git_error(exc)
+            else:
+                converted_error = convert_github_api_error(exc)
+            converted_error.display_and_exit()
+        except Exception as e:
+            if repo_ctx.progress_tracker:
+                repo_ctx.progress_tracker.stop()
+            if is_github_api_permission_error(e):
+                exit_for_github_api_error(exception=e)
+            elif is_network_error(e):
+                converted_error = convert_network_error(e)
+                converted_error.display_and_exit()
+            else:
+                exit_with_error(
+                    ExitCode.GENERAL_ERROR,
+                    message="❌ Error during repository merge operation",
+                    details=str(e),
+                    exception=e,
+                )
+        return
+
+    # --- Route: GitHub single PR merge flow ---
+    assert parsed_url is not None
     ctx = _MergeContext(
         pr_url=parsed_url.original_url,
         no_confirm=no_confirm,
@@ -1252,6 +1729,7 @@ def merge(
         netrc_file=netrc_file,
         netrc_optional=netrc_optional,
         github2gerrit_mode=github2gerrit_mode,
+        include_human_prs=include_human_prs,
     )
 
     try:

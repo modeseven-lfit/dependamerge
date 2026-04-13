@@ -696,6 +696,74 @@ class GitHubService:
 
         return results
 
+    async def fetch_repo_open_prs(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        only_automation: bool = True,
+    ) -> list[PullRequestInfo]:
+        """
+        Fetch all open PRs for a specific repository.
+
+        This is used for repository-scoped bulk operations where we don't
+        need to scan across an organization. It reuses the same GraphQL
+        pagination infrastructure used by find_similar_prs.
+
+        Args:
+            owner: Repository owner (user or organization).
+            repo: Repository name.
+            only_automation: If True, only return PRs from automation tools.
+                           If False, return all open PRs.
+
+        Returns:
+            List of PullRequestInfo for matching open PRs.
+        """
+        repo_full_name = f"{owner}/{repo}"
+
+        if self._progress:
+            self._progress.start_repository(repo_full_name)
+            self._progress.update_operation(
+                f"Fetching open PRs from {repo_full_name}"
+            )
+
+        first_nodes, page_info = await self._fetch_repo_prs_first_page(
+            owner, repo
+        )
+        pr_nodes = list(first_nodes)
+        has_next = bool(page_info.get("hasNextPage"))
+        end_cursor = page_info.get("endCursor") or None
+
+        # Fetch additional pages if present
+        if has_next:
+            async for pr_node in self._iter_repo_open_prs_pages(
+                owner, repo, end_cursor
+            ):
+                pr_nodes.append(pr_node)
+
+        results: list[PullRequestInfo] = []
+        for pr_node in pr_nodes:
+            pr_info = self.to_pull_request_info(repo_full_name, pr_node)
+
+            if self._progress:
+                self._progress.analyze_pr(pr_info.number, repo_full_name)
+
+            # Filter by automation author if requested
+            if only_automation:
+                is_auto = any(
+                    bot in (pr_info.author or "").lower()
+                    for bot in AUTOMATION_TOOLS
+                )
+                if not is_auto:
+                    continue
+
+            results.append(pr_info)
+
+        if self._progress:
+            self._progress.complete_repository(0)
+
+        return results
+
     async def get_branch_protection_settings(
         self, owner: str, repo: str, branch: str = "main"
     ) -> dict[str, Any] | None:
